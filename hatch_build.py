@@ -1,5 +1,6 @@
 """Custom build hook for hatchling to build whisper.cpp binaries."""
 import glob
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,13 @@ class CustomBuildHook(BuildHookInterface):
 
     def initialize(self, version, build_data):
         """Run make buzz/whisper_cpp before building."""
+        if os.environ.get("BUZZ_SKIP_NATIVE_BUILD"):
+            # Development escape hatch: skip the native builds (whisper.cpp,
+            # translation .mo, ctc_forced_aligner) for editable installs where
+            # the binaries are supplied out-of-band or not needed.
+            print("BUZZ_SKIP_NATIVE_BUILD is set — skipping native builds")
+            return
+
         print("Running 'make buzz/whisper_cpp' to build whisper.cpp binaries...")
 
         # Mark wheel as platform-specific since we're including compiled binaries
