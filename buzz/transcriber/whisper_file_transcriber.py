@@ -30,12 +30,40 @@ from buzz.transcriber.transcriber import FileTranscriptionTask, Segment, Task, D
 from buzz.transcriber.whisper_cpp import WhisperCpp
 
 import av
-import faster_whisper
-import whisper
-import stable_whisper
-from stable_whisper import WhisperResult
+
+# Some transcription engines rely on packages that do not publish wheels for
+# every architecture (e.g. Windows on ARM64: ctranslate2, tiktoken and
+# torchaudio have no win_arm64 wheels). Import them optionally so the app
+# still starts, and raise a clear error when the engine is selected
+# (see _ensure_engine_available).
+try:
+    import faster_whisper
+except ImportError:  # requires ctranslate2
+    faster_whisper = None
+
+try:
+    import whisper
+except ImportError:  # requires tiktoken
+    whisper = None
+
+try:
+    import stable_whisper
+    from stable_whisper import WhisperResult
+except ImportError:  # requires torchaudio
+    stable_whisper = None
+    WhisperResult = None
 
 PROGRESS_REGEX = re.compile(r"\d+(\.\d+)?%")
+
+
+def _ensure_engine_available(module, engine_name: str, reason: str) -> None:
+    """Fail a transcription that selected an engine whose dependencies are
+    unavailable on this machine (see the optional engine imports above)."""
+    if module is None:
+        raise ImportError(
+            f"The {engine_name} engine is unavailable on this machine: "
+            f"{reason}. Use the Whisper.cpp engine instead."
+        )
 
 
 def terminate_child_processes(pid: int, timeout: float = 5.0) -> None:
@@ -258,8 +286,18 @@ class WhisperFileTranscriber(FileTranscriber):
                 elif (
                     task.transcription_options.model.model_type == ModelType.FASTER_WHISPER
                 ):
+                    _ensure_engine_available(
+                        faster_whisper,
+                        "Faster whisper",
+                        "ctranslate2 does not provide wheels for this architecture",
+                    )
                     segments = cls.transcribe_faster_whisper(task)
                 elif task.transcription_options.model.model_type == ModelType.WHISPER:
+                    _ensure_engine_available(
+                        whisper,
+                        "Whisper (OpenAI)",
+                        "tiktoken does not provide wheels for this architecture",
+                    )
                     segments = cls.transcribe_openai_whisper(task)
                 else:
                     raise Exception(
