@@ -21,37 +21,41 @@ dependencies = [
     "numpy>=2.5.2,<3",
     "requests>=2.34.2,<3",
     "yt-dlp>=2026.8.19",
-    "stable-ts>=2.19.1,<3",
-    "faster-whisper>=1.2.1,<2",
-    "openai-whisper==20250625",
+    "stable-ts>=2.19.1,<3; platform_machine != 'ARM64'",  # requires torchaudio (no win_arm64 wheels)
+    "faster-whisper>=1.2.1,<2; platform_machine != 'ARM64'",  # requires ctranslate2
+    "openai-whisper==20250625; platform_machine != 'ARM64'",  # requires tiktoken
     "transformers>=5.19.0,<6",
     "accelerate>=1.14.0,<2",
     "peft>=0.20.0,<1",
-    "bitsandbytes>=0.45.0",
+    "bitsandbytes>=0.45.0; platform_machine != 'ARM64'",
+    "bitsandbytes>=0.50.0; sys_platform == 'win32' and platform_machine == 'ARM64'",  # win_arm64 wheels start here
     "polib>=1.2.0,<2",
     "srt-equalizer>=0.1.10,<0.2",
     "ctranslate2>=4.6.2,<5; sys_platform == 'darwin'",
     # For Linux/Windows - use CPU versions from pytorch index
-    "ctranslate2>=4.6.2,<5; sys_platform != 'darwin'",
+    "ctranslate2>=4.6.2,<5; sys_platform != 'darwin' and platform_machine != 'ARM64'",
     "torch==2.8.0+cpu; sys_platform != 'darwin'",
-    "torchaudio==2.8.0+cpu; sys_platform != 'darwin'",
+    "torchaudio==2.8.0+cpu; sys_platform != 'darwin' and platform_machine != 'ARM64'",
     # For ARM Mac - use regular PyPI torch
     "torch==2.8.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "torchaudio==2.8.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # faster whisper need cudnn 9
-    "nvidia-cudnn-cu12>=9,<10; sys_platform != 'darwin'",
+    "nvidia-cudnn-cu12>=9,<10; sys_platform != 'darwin' and platform_machine != 'ARM64'",
     # CUDA runtime libraries are provided by torch dependencies, no need to specify explicitly
     "darkdetect>=0.8.0,<0.9",
-    "demucs>=4.1.0,<5",
+    "demucs>=4.1.0,<5; platform_machine != 'ARM64'",  # requires sphn (no win_arm64 wheels)
     "flake8>=7.1.2,<8",
     "mypy>=1.15.0,<2",
     "psutil>=7.2.2,<8",
     "pyyaml>=6.0.3,<7",
     "tqdm>=4.70.0,<5",
-    "soundfile>=0.13.1,<0.14",
+    "soundfile>=0.13.1,<0.14; platform_machine != 'ARM64'",
+    "soundfile>=0.14,<0.15; sys_platform == 'win32' and platform_machine == 'ARM64'",  # win_arm64 wheels start here
     "urllib3>=2.7.0,<3",
     "posthog>=7.42.1",
-    "onnxruntime==1.20.0",
+    "onnxruntime==1.20.0; platform_machine != 'ARM64'",
+    "onnxruntime>=1.24.4,<2; sys_platform == 'win32' and platform_machine == 'ARM64'",  # win_arm64 wheels start at 1.24.2; 1.24.4 aligns with QNN
+    "onnxruntime-qnn==2.3.0; sys_platform == 'win32' and platform_machine == 'ARM64'",  # Qualcomm QNN execution provider (Hexagon NPU)
     "onnx>=1.20.0",  # Required for nemo-toolkit, ensures ml-dtypes is installed
     "vulkan>=1.3.275.1,<2",
     "hf-xet>=1.6.0,<2",
@@ -60,17 +64,17 @@ dependencies = [
     # nemo-toolkit-asr is NVIDIA's ASR-only split package; 2.8.0rc2 is the first
     # release to unpin transformers (allows 5.x). Regular nemo-toolkit caps at
     # transformers <4.58. cuda-bindings pinned <13 below to stay on CUDA 12.
-    "nemo-toolkit-asr[asr]==2.8.0rc2",
+    "nemo-toolkit-asr[asr]==2.8.0rc2; platform_machine != 'ARM64'",  # requires pyarrow via datasets
     # nemo-toolkit-asr leaves cuda-bindings unpinned; keep it on CUDA 12 to match torch cu129
-    "cuda-bindings>=12.6,<13; sys_platform != 'darwin'",
+    "cuda-bindings>=12.6,<13; sys_platform != 'darwin' and platform_machine != 'ARM64'",
     "nltk>=3.10.3",
     "uroman>=1.3.1.1",
-    "lhotse>=1.33.0",
+    "lhotse>=1.33.0; platform_machine != 'ARM64'",
     "coverage==7.15.4",
     "certifi>=2026.7.22",
     "truststore>=0.10.4",
-    "torchcodec>=0.16.0",
-    "datasets>=5.0.1",
+    "torchcodec>=0.16.0; platform_machine != 'ARM64'",
+    "datasets>=5.0.1; platform_machine != 'ARM64'",
 ]
 repository = "https://github.com/chidiwilliams/buzz"
 documentation = "https://chidiwilliams.github.io/buzz/docs"

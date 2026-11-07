@@ -1,9 +1,10 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.13.*"
 resolution-markers = [
     "sys_platform == 'linux'",
-    "sys_platform == 'win32'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
     "platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 supported-markers = [
@@ -273,7 +274,7 @@ version = "0.47.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "sys_platform == 'linux'",
-    "sys_platform == 'win32'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
 ]
 dependencies = [
     { name = "numpy" },
@@ -302,6 +303,23 @@ wheels = [
 ]
 
 [[package]]
+name = "bitsandbytes"
+version = "0.50.2"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" } },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/72/82/742dc27a1feab90c8f87f2ed14e6d72d05f9e1cf764b4d2ba30aa9b4a2cb/bitsandbytes-0.50.2-py3-none-win_amd64.whl", hash = "sha256:c697963c8fda3dcd0d7ebd9b5211ae4067feef7cd06e0350d4e816a434fe683d", size = 39096375, upload-time = "2026-08-27T00:10:58.297Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/57/61636c5b11b0a32e505127a6dce6fa8fcbf73978babe8fa37082ab547f1c/bitsandbytes-0.50.2-py3-none-win_arm64.whl", hash = "sha256:8437ab68a04ea56daf1d6ecb54230fb1d88be4b89fe2d79bc399bc0203b487cf", size = 1058684, upload-time = "2026-08-27T00:11:00.664Z" },
+]
+
+[[package]]
 name = "braceexpand"
 version = "0.1.7"
 source = { registry = "https://pypi.org/simple" }
@@ -314,35 +332,39 @@ wheels = [
 name = "buzz-captions"
 version = "1.4.6"
 source = { editable = "." }
+default-groups = ["build", "dev"]
 dependencies = [
     { name = "accelerate" },
-    { name = "bitsandbytes", version = "0.47.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "bitsandbytes", version = "0.47.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'ARM64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32')" },
     { name = "bitsandbytes", version = "0.49.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "bitsandbytes", version = "0.50.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "certifi" },
     { name = "cmake" },
     { name = "coverage" },
-    { name = "ctranslate2" },
-    { name = "cuda-bindings", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "ctranslate2", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "cuda-bindings", marker = "(platform_machine != 'ARM64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32')" },
     { name = "darkdetect" },
     { name = "dataclasses-json" },
-    { name = "datasets" },
-    { name = "demucs" },
-    { name = "faster-whisper" },
+    { name = "datasets", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "demucs", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "faster-whisper", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "flake8" },
     { name = "hatchling" },
     { name = "hf-xet" },
     { name = "humanize" },
     { name = "keyring" },
-    { name = "lhotse" },
+    { name = "lhotse", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "mypy" },
-    { name = "nemo-toolkit-asr", extra = ["asr"] },
+    { name = "nemo-toolkit-asr", extra = ["asr"], marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "nltk" },
     { name = "numpy" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine != 'ARM64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32')" },
     { name = "onnx" },
-    { name = "onnxruntime" },
+    { name = "onnxruntime", version = "1.20.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
+    { name = "onnxruntime-qnn", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "openai" },
-    { name = "openai-whisper" },
+    { name = "openai-whisper", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "peft" },
     { name = "platformdirs" },
     { name = "polib" },
@@ -354,14 +376,15 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "sounddevice" },
-    { name = "soundfile" },
+    { name = "soundfile", version = "0.13.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "soundfile", version = "0.14.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "srt-equalizer" },
-    { name = "stable-ts" },
+    { name = "stable-ts", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torchaudio", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-    { name = "torchaudio", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-    { name = "torchcodec" },
+    { name = "torchaudio", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(platform_machine != 'ARM64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32')" },
+    { name = "torchcodec", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "tqdm" },
     { name = "transformers" },
     { name = "truststore" },
@@ -398,33 +421,36 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.14.0,<2" },
-    { name = "bitsandbytes", specifier = ">=0.45.0" },
+    { name = "bitsandbytes", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = ">=0.50.0" },
+    { name = "bitsandbytes", marker = "platform_machine != 'ARM64'", specifier = ">=0.45.0" },
     { name = "certifi", specifier = ">=2026.7.22" },
     { name = "cmake", specifier = ">=4.4.2,<5" },
     { name = "coverage", specifier = "==7.15.4" },
-    { name = "ctranslate2", marker = "sys_platform != 'darwin'", specifier = ">=4.6.2,<5" },
     { name = "ctranslate2", marker = "sys_platform == 'darwin'", specifier = ">=4.6.2,<5" },
-    { name = "cuda-bindings", marker = "sys_platform != 'darwin'", specifier = ">=12.6,<13" },
+    { name = "ctranslate2", marker = "platform_machine != 'ARM64' and sys_platform != 'darwin'", specifier = ">=4.6.2,<5" },
+    { name = "cuda-bindings", marker = "platform_machine != 'ARM64' and sys_platform != 'darwin'", specifier = ">=12.6,<13" },
     { name = "darkdetect", specifier = ">=0.8.0,<0.9" },
     { name = "dataclasses-json", specifier = ">=0.6.4,<0.7" },
-    { name = "datasets", specifier = ">=5.0.1" },
-    { name = "demucs", specifier = ">=4.1.0,<5" },
-    { name = "faster-whisper", specifier = ">=1.2.1,<2" },
+    { name = "datasets", marker = "platform_machine != 'ARM64'", specifier = ">=5.0.1" },
+    { name = "demucs", marker = "platform_machine != 'ARM64'", specifier = ">=4.1.0,<5" },
+    { name = "faster-whisper", marker = "platform_machine != 'ARM64'", specifier = ">=1.2.1,<2" },
     { name = "flake8", specifier = ">=7.1.2,<8" },
     { name = "hatchling", specifier = ">=1.32.0" },
     { name = "hf-xet", specifier = ">=1.6.0,<2" },
     { name = "humanize", specifier = ">=4.16.0,<5" },
     { name = "keyring", specifier = ">=25.7.0,<26" },
-    { name = "lhotse", specifier = ">=1.33.0" },
+    { name = "lhotse", marker = "platform_machine != 'ARM64'", specifier = ">=1.33.0" },
     { name = "mypy", specifier = ">=1.15.0,<2" },
-    { name = "nemo-toolkit-asr", extras = ["asr"], specifier = "==2.8.0rc2" },
+    { name = "nemo-toolkit-asr", extras = ["asr"], marker = "platform_machine != 'ARM64'", specifier = "==2.8.0rc2" },
     { name = "nltk", specifier = ">=3.10.3" },
     { name = "numpy", specifier = ">=2.5.2,<3" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform != 'darwin'", specifier = ">=9,<10" },
+    { name = "nvidia-cudnn-cu12", marker = "platform_machine != 'ARM64' and sys_platform != 'darwin'", specifier = ">=9,<10" },
     { name = "onnx", specifier = ">=1.20.0" },
-    { name = "onnxruntime", specifier = "==1.20.0" },
+    { name = "onnxruntime", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = ">=1.24.4,<2" },
+    { name = "onnxruntime", marker = "platform_machine != 'ARM64'", specifier = "==1.20.0" },
+    { name = "onnxruntime-qnn", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = "==2.3.0" },
     { name = "openai", specifier = ">=1.14.2,<2" },
-    { name = "openai-whisper", specifier = "==20250625" },
+    { name = "openai-whisper", marker = "platform_machine != 'ARM64'", specifier = "==20250625" },
     { name = "peft", specifier = ">=0.20.0,<1" },
     { name = "platformdirs", specifier = ">=4.11.3,<5" },
     { name = "polib", specifier = ">=1.2.0,<2" },
@@ -436,14 +462,15 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "requests", specifier = ">=2.34.2,<3" },
     { name = "sounddevice", specifier = ">=0.5.6,<0.6" },
-    { name = "soundfile", specifier = ">=0.13.1,<0.14" },
+    { name = "soundfile", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = ">=0.14,<0.15" },
+    { name = "soundfile", marker = "platform_machine != 'ARM64'", specifier = ">=0.13.1,<0.14" },
     { name = "srt-equalizer", specifier = ">=0.1.10,<0.2" },
-    { name = "stable-ts", specifier = ">=2.19.1,<3" },
+    { name = "stable-ts", marker = "platform_machine != 'ARM64'", specifier = ">=2.19.1,<3" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = "==2.8.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==2.8.0" },
-    { name = "torchaudio", marker = "sys_platform != 'darwin'", specifier = "==2.8.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchaudio", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==2.8.0" },
-    { name = "torchcodec", specifier = ">=0.16.0" },
+    { name = "torchaudio", marker = "platform_machine != 'ARM64' and sys_platform != 'darwin'", specifier = "==2.8.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torchcodec", marker = "platform_machine != 'ARM64'", specifier = ">=0.16.0" },
     { name = "tqdm", specifier = ">=4.70.0,<5" },
     { name = "transformers", specifier = ">=5.19.0,<6" },
     { name = "truststore", specifier = ">=0.10.4" },
@@ -967,7 +994,7 @@ dependencies = [
     { name = "av" },
     { name = "ctranslate2" },
     { name = "huggingface-hub" },
-    { name = "onnxruntime" },
+    { name = "onnxruntime", version = "1.20.0", source = { registry = "https://pypi.org/simple" } },
     { name = "tokenizers" },
     { name = "tqdm" },
 ]
@@ -1244,7 +1271,7 @@ dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "(platform_machine == 'AMD64' and sys_platform == 'linux') or (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'amd64' and sys_platform == 'linux') or (platform_machine == 'arm64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (platform_machine == 'aarch64' and sys_platform == 'win32') or (platform_machine == 'amd64' and sys_platform == 'win32') or (platform_machine == 'arm64' and sys_platform == 'win32') or (platform_machine == 'x86_64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "httpx" },
     { name = "packaging" },
     { name = "pyyaml" },
@@ -1644,7 +1671,7 @@ dependencies = [
     { name = "numpy" },
     { name = "packaging" },
     { name = "pyyaml" },
-    { name = "soundfile" },
+    { name = "soundfile", version = "0.13.1", source = { registry = "https://pypi.org/simple" } },
     { name = "tabulate" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -1695,7 +1722,7 @@ dependencies = [
     { name = "pooch" },
     { name = "scikit-learn" },
     { name = "scipy" },
-    { name = "soundfile" },
+    { name = "soundfile", version = "0.13.1", source = { registry = "https://pypi.org/simple" } },
     { name = "soxr" },
     { name = "standard-aifc" },
     { name = "standard-sunau" },
@@ -2168,7 +2195,7 @@ asr = [
     { name = "sacremoses" },
     { name = "scipy" },
     { name = "sentencepiece" },
-    { name = "soundfile" },
+    { name = "soundfile", version = "0.13.1", source = { registry = "https://pypi.org/simple" } },
     { name = "sox" },
     { name = "torchmetrics" },
     { name = "transformers" },
@@ -2376,6 +2403,11 @@ wheels = [
 name = "onnxruntime"
 version = "1.20.0"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform == 'linux'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
+    "platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 dependencies = [
     { name = "coloredlogs" },
     { name = "flatbuffers" },
@@ -2391,6 +2423,42 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/96/00/1740c6d5a6fed87dfb69388ec88b77ff5e453b745be0e65db0371e10bc50/onnxruntime-1.20.0-cp313-cp313-win_amd64.whl", hash = "sha256:25514cec4ea251d492aa1e38a7395d8801e64a4c940a154aef84cfad97ae4628", size = 11322362, upload-time = "2024-11-01T17:47:44.998Z" },
     { url = "https://files.pythonhosted.org/packages/11/15/099b97c6ecbd4aeb66fb5b18b379d67b4162698c0c286cc5d2928984fd59/onnxruntime-1.20.0-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:640ad9ea72d322f0325a51544eddb54f4fa843c4348573c88a9cb44f46678f3f", size = 11942537, upload-time = "2024-11-01T17:47:48.161Z" },
     { url = "https://files.pythonhosted.org/packages/ca/4f/d1d7642706ddce8c253255b52cf8a6fdb6d4aca171a7a476188039816b79/onnxruntime-1.20.0-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dc4e7c10c98c1f407835448c26a7e14ebff3234f131e1fbc53bd9500c828df89", size = 13319499, upload-time = "2024-11-01T17:47:51.06Z" },
+]
+
+[[package]]
+name = "onnxruntime"
+version = "1.31.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "flatbuffers" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/bf/a1d282b4c753ba3e9b31f4c11abd2bc2390513dc5e3792ca3b78e42401c3/onnxruntime-1.31.1-cp313-cp313-win_amd64.whl", hash = "sha256:0558f29d5f6ac09957390c9c5495931485ee8ae7f0ce781ccee86a0ae5c2348b", size = 14888304, upload-time = "2026-10-26T19:26:41.032Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/fd/529135287474dbaf19d9362ccda61998128ab18507f78bc82931e1bbaf22/onnxruntime-1.31.1-cp313-cp313-win_arm64.whl", hash = "sha256:075147c2e2430b4b29c436bffa78537b902a6ed58ed66f99ae3c6795e2081cb5", size = 14740772, upload-time = "2026-10-26T19:26:44.042Z" },
+]
+
+[[package]]
+name = "onnxruntime-qnn"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "coloredlogs" },
+    { name = "flatbuffers" },
+    { name = "numpy" },
+    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "sympy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/97/8d3df3770add9568ced2149ee961a1b8b2eec5939eb62a36a6964e9d9728/onnxruntime_qnn-2.3.0-cp313-cp313-win_amd64.whl", hash = "sha256:adeb9fcbf5404d9e5d12825f58836db2a929ebde3e53e0888fa899b2a006096b", size = 187860290, upload-time = "2026-06-22T21:14:00.282Z" },
+    { url = "https://files.pythonhosted.org/packages/56/59/86ec514ae667198e2b66053831459ecaf625eddcfc720864e9262a49f74e/onnxruntime_qnn-2.3.0-cp313-cp313-win_arm64.whl", hash = "sha256:84a46c0ade5ca1aa37da79970e834f00fa1e1cceee0af5166c374f2757b1f5d8", size = 57806238, upload-time = "2026-06-22T21:14:41.932Z" },
 ]
 
 [[package]]
@@ -3640,6 +3708,11 @@ wheels = [
 name = "soundfile"
 version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform == 'linux'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
+    "platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 dependencies = [
     { name = "cffi" },
     { name = "numpy" },
@@ -3652,6 +3725,25 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/57/5e/70bdd9579b35003a489fc850b5047beeda26328053ebadc1fb60f320f7db/soundfile-0.13.1-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:03267c4e493315294834a0870f31dbb3b28a95561b80b134f0bd3cf2d5f0e618", size = 1313646, upload-time = "2025-01-25T09:16:54.872Z" },
     { url = "https://files.pythonhosted.org/packages/fe/df/8c11dc4dfceda14e3003bb81a0d0edcaaf0796dd7b4f826ea3e532146bba/soundfile-0.13.1-py2.py3-none-win32.whl", hash = "sha256:c734564fab7c5ddf8e9be5bf70bab68042cd17e9c214c06e365e20d64f9a69d5", size = 899881, upload-time = "2025-01-25T09:16:56.663Z" },
     { url = "https://files.pythonhosted.org/packages/14/e9/6b761de83277f2f02ded7e7ea6f07828ec78e4b229b80e4ca55dd205b9dc/soundfile-0.13.1-py2.py3-none-win_amd64.whl", hash = "sha256:1e70a05a0626524a69e9f0f4dd2ec174b4e9567f4d8b6c11d38b5c289be36ee9", size = 1019162, upload-time = "2025-01-25T09:16:59.573Z" },
+]
+
+[[package]]
+name = "soundfile"
+version = "0.14.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "cffi" },
+    { name = "numpy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d2/db/949331952a6fb1c5b12e9de80fd08747966c2039d1a61db4764fbd3981c2/soundfile-0.14.0.tar.gz", hash = "sha256:ba1c1a2d618bca5c406647c83b89f07cc8810fa506a50622a6993ba130c1de11", size = 47842, upload-time = "2026-06-06T08:58:47.869Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/d1/5e338af9ca6ed0786cd5bb03f6d60de1c325728c1189014f3b59aae7403c/soundfile-0.14.0-py2.py3-none-any.whl", hash = "sha256:8ba81ae3a89fd5ab3bef8a8eb481fbbe794e806309675a89b4df48b8d31908a8", size = 26799, upload-time = "2026-06-06T08:58:33.269Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/97/b39c18ac1df45e755ca22b8b00e872929da5d107998a207a5e4ac831bfda/soundfile-0.14.0-py2.py3-none-win_amd64.whl", hash = "sha256:299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e", size = 1021480, upload-time = "2026-06-06T08:58:45.016Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/83/55c65e61cf457805ce2ec157c1c6ae17715d0851aa2374422de0538838ca/soundfile-0.14.0-py2.py3-none-win_arm64.whl", hash = "sha256:e090704718e124e7c844695236f1fce8d18a5e761eaf7c82dfcd124620805f98", size = 888858, upload-time = "2026-06-06T08:58:46.593Z" },
 ]
 
 [[package]]
@@ -3972,7 +4064,8 @@ version = "2.8.0+cpu"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 resolution-markers = [
     "sys_platform == 'linux'",
-    "sys_platform == 'win32'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
 ]
 dependencies = [
     { name = "filelock" },
@@ -4015,7 +4108,7 @@ version = "2.8.0+cpu"
 source = { registry = "https://download.pytorch.org/whl/cpu" }
 resolution-markers = [
     "sys_platform == 'linux'",
-    "sys_platform == 'win32'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
 ]
 dependencies = [
     { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" } },
