@@ -380,7 +380,7 @@ dependencies = [
     { name = "nvidia-cudnn-cu12", marker = "(platform_machine != 'ARM64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32')" },
     { name = "onnx" },
     { name = "onnxruntime", version = "1.20.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
+    { name = "onnxruntime", version = "1.27.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "onnxruntime-qnn", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "openai" },
     { name = "openai-whisper", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
@@ -466,9 +466,9 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.5.2,<3" },
     { name = "nvidia-cudnn-cu12", marker = "platform_machine != 'ARM64' and sys_platform != 'darwin'", specifier = ">=9,<10" },
     { name = "onnx", specifier = ">=1.20.0" },
-    { name = "onnxruntime", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = ">=1.24.4,<2" },
+    { name = "onnxruntime", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = "==1.27.0" },
     { name = "onnxruntime", marker = "platform_machine != 'ARM64'", specifier = "==1.20.0" },
-    { name = "onnxruntime-qnn", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = "==2.3.0" },
+    { name = "onnxruntime-qnn", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = "==2.6.0" },
     { name = "openai", specifier = ">=1.14.2,<2" },
     { name = "openai-whisper", marker = "platform_machine != 'ARM64'", specifier = "==20250625" },
     { name = "peft", specifier = ">=0.20.0,<1" },
@@ -2447,7 +2447,7 @@ wheels = [
 
 [[package]]
 name = "onnxruntime"
-version = "1.31.1"
+version = "1.27.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "platform_machine == 'ARM64' and sys_platform == 'win32'",
@@ -2459,26 +2459,26 @@ dependencies = [
     { name = "protobuf" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/bf/a1d282b4c753ba3e9b31f4c11abd2bc2390513dc5e3792ca3b78e42401c3/onnxruntime-1.31.1-cp313-cp313-win_amd64.whl", hash = "sha256:0558f29d5f6ac09957390c9c5495931485ee8ae7f0ce781ccee86a0ae5c2348b", size = 14888304, upload-time = "2026-10-26T19:26:41.032Z" },
-    { url = "https://files.pythonhosted.org/packages/7e/fd/529135287474dbaf19d9362ccda61998128ab18507f78bc82931e1bbaf22/onnxruntime-1.31.1-cp313-cp313-win_arm64.whl", hash = "sha256:075147c2e2430b4b29c436bffa78537b902a6ed58ed66f99ae3c6795e2081cb5", size = 14740772, upload-time = "2026-10-26T19:26:44.042Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/76/59ed932b0244acd7bbbd6449480053a6d958ea66357f022f932872e19287/onnxruntime-1.27.0-cp313-cp313-win_amd64.whl", hash = "sha256:760021bca514d64a811837820d351a08a41741f16f8b4c26450da708fecf14e6", size = 13357856, upload-time = "2026-06-15T22:43:37.315Z" },
+    { url = "https://files.pythonhosted.org/packages/79/51/d1ec60ec7b1e2ae2d7340ba52b8a13529140039cd4407ba8dddbbc046582/onnxruntime-1.27.0-cp313-cp313-win_arm64.whl", hash = "sha256:2fdfa9df40a0ded0028ce6f9cd863264237f3970559dea2b81456e9ac4622b94", size = 13104412, upload-time = "2026-06-15T22:43:27.457Z" },
 ]
 
 [[package]]
 name = "onnxruntime-qnn"
-version = "2.3.0"
+version = "2.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "coloredlogs" },
     { name = "flatbuffers" },
     { name = "numpy" },
-    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "onnxruntime", version = "1.27.0", source = { registry = "https://pypi.org/simple" } },
     { name = "packaging" },
     { name = "protobuf" },
     { name = "sympy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/97/8d3df3770add9568ced2149ee961a1b8b2eec5939eb62a36a6964e9d9728/onnxruntime_qnn-2.3.0-cp313-cp313-win_amd64.whl", hash = "sha256:adeb9fcbf5404d9e5d12825f58836db2a929ebde3e53e0888fa899b2a006096b", size = 187860290, upload-time = "2026-06-22T21:14:00.282Z" },
-    { url = "https://files.pythonhosted.org/packages/56/59/86ec514ae667198e2b66053831459ecaf625eddcfc720864e9262a49f74e/onnxruntime_qnn-2.3.0-cp313-cp313-win_arm64.whl", hash = "sha256:84a46c0ade5ca1aa37da79970e834f00fa1e1cceee0af5166c374f2757b1f5d8", size = 57806238, upload-time = "2026-06-22T21:14:41.932Z" },
+    { url = "https://files.pythonhosted.org/packages/df/53/f4b98a41a1764de81c8fb8faa9a7bf56d3d9325a8ed51f6a1585684d4fbe/onnxruntime_qnn-2.6.0-cp313-cp313-win_amd64.whl", hash = "sha256:8b0776e09f8a3094bd10b6ede8fcbdc491ee9600d6130f20eac672766ff30c72", size = 189668231, upload-time = "2026-09-10T23:55:53.511Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/6e/505abdc727ebc03237e2c4a5cb8ce02b9228aa75af5dc371457d2a6e9196/onnxruntime_qnn-2.6.0-cp313-cp313-win_arm64.whl", hash = "sha256:fb09121dc00f7cf2ef11dccf4b3ee9882e2afb2ddf9a77061e6d75274dc3dd82", size = 59225944, upload-time = "2026-09-10T23:55:30.053Z" },
 ]
 
 [[package]]

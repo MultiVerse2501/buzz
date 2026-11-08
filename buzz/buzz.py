@@ -75,6 +75,13 @@ def main():
         format=log_format,
     )
 
+    # P2 M0: record whether the ORT-QNN NPU engine can be offered on this machine
+    # (model_loader entries in M1 consume this probe to show/hide the engine).
+    if sys.platform == "win32" and platform.machine() == "ARM64":
+        from buzz.npu_capability import is_npu_transcription_available
+
+        logging.info("NPU transcription available: %s", is_npu_transcription_available())
+
     # Silence noisy third-party library loggers
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("graphviz").setLevel(logging.WARNING)
