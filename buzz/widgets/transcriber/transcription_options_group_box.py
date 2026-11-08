@@ -222,6 +222,11 @@ class TranscriptionOptionsGroupBox(QGroupBox):
                 and model_type != ModelType.WHISPER_CPP):
             self.transcription_options.model.whisper_model_size = WhisperModelSize.LARGEV3TURBO
 
+        # Whisper NPU ships exactly one compiled model (Whisper-Base); keep a
+        # valid size recorded for downstream code that reads whisper_model_size.
+        if model_type == ModelType.WHISPER_NPU:
+            self.transcription_options.model.whisper_model_size = WhisperModelSize.BASE
+
         self.reset_visible_rows()
         self.transcription_options_changed.emit(self.transcription_options)
 

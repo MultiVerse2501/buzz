@@ -1,7 +1,11 @@
 import io
+import json
 import os
 import threading
 import time
+import zipfile
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch, MagicMock, call
 
@@ -29,6 +33,12 @@ from buzz.model_loader import (
     is_coreml_supported,
     DOWNLOAD_COMPLETE_MARKER,
     _snapshot_is_complete,
+    WHISPER_NPU_ASSET_RELEASE,
+    WHISPER_NPU_ASSETS,
+    WHISPER_NPU_ASSET_FILES,
+    get_whisper_npu_zip_path,
+    get_whisper_npu_model_dir,
+    whisper_npu_asset_is_complete,
 )
 
 
@@ -1141,6 +1151,296 @@ class TestModelDownloaderWhisperCpp:
         downloader.signals.finished.emit.assert_called_once_with(
             str(tmp_path / f"ggml-{model_name}.bin")
         )
+
+
+def _stage_whisper_npu_asset(chipset: str) -> str:
+    """Build a complete fake NPU asset dir under the (already patched) model root."""
+    model_dir = Path(get_whisper_npu_model_dir(chipset))
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for name in WHISPER_NPU_ASSET_FILES:
+        (model_dir / name).write_bytes(b"asset")
+    htp = WHISPER_NPU_ASSETS[chipset]["htp_version"]
+    (model_dir / "metadata.json").write_text(json.dumps({
+        "runtime": "precompiled_qnn_onnx",
+        "chipset_attributes": {"htp_version": htp},
+    }), encoding="utf-8")
+    return str(model_dir)
+
+
+class TestWhisperNpuAssets:
+    def test_asset_table_has_both_chipsets(self):
+        assert set(WHISPER_NPU_ASSETS) == {"x2-elite", "x-elite"}
+        for chipset, asset in WHISPER_NPU_ASSETS.items():
+            assert asset["url"].startswith(
+                "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/")
+            assert WHISPER_NPU_ASSET_RELEASE in asset["url"]
+            assert f"snapdragon_{chipset.replace('-', '_')}.zip" in asset["url"]
+            assert len(asset["sha256"]) == 64
+            assert asset["zip_bytes"] > 100 * 1024 * 1024
+            assert asset["htp_version"] in (73, 81)
+
+    def test_layout_under_model_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        assert get_whisper_npu_zip_path("x2-elite") == os.path.join(
+            str(tmp_path), "whisper-npu", "x2-elite.zip")
+        assert get_whisper_npu_model_dir("x2-elite") == os.path.join(
+            str(tmp_path), "whisper-npu", "x2-elite")
+
+    def test_completeness(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        chipset = "x2-elite"
+        assert whisper_npu_asset_is_complete(chipset) is False
+
+        _stage_whisper_npu_asset(chipset)
+        assert whisper_npu_asset_is_complete(chipset) is True
+
+        # Wrong htp version in metadata -> not this chipset's asset
+        (Path(get_whisper_npu_model_dir(chipset)) / "metadata.json").write_text(
+            json.dumps({"runtime": "precompiled_qnn_onnx",
+                        "chipset_attributes": {"htp_version": 123}}),
+            encoding="utf-8")
+        assert whisper_npu_asset_is_complete(chipset) is False
+
+        # Corrupt metadata
+        (Path(get_whisper_npu_model_dir(chipset)) / "metadata.json").write_text(
+            "not json", encoding="utf-8")
+        assert whisper_npu_asset_is_complete(chipset) is False
+
+    def test_missing_file_is_incomplete(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        _stage_whisper_npu_asset("x-elite")
+        os.remove(get_whisper_npu_model_dir("x-elite") + os.sep + "decoder.bin")
+        assert whisper_npu_asset_is_complete("x-elite") is False
+
+    def test_unknown_chipset_is_incomplete(self):
+        assert whisper_npu_asset_is_complete("v68-phone") is False
+
+
+class TestWhisperNpuModelType:
+    def test_str(self):
+        model = TranscriptionModel(model_type=ModelType.WHISPER_NPU)
+        assert str(model) == "Whisper NPU"
+
+    def test_supports_initial_prompt_false(self):
+        assert ModelType.WHISPER_NPU.supports_initial_prompt is False
+
+    def test_is_manually_downloadable_false(self):
+        assert ModelType.WHISPER_NPU.is_manually_downloadable() is False
+
+    def test_is_available_false_off_windows_arm64(self):
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.machine", return_value="x86_64"):
+            assert ModelType.WHISPER_NPU.is_available() is False
+
+    def test_is_available_requires_probe_and_chipset(self):
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="ARM64"), \
+             patch("buzz.npu_capability.is_npu_transcription_available", return_value=True), \
+             patch("buzz.npu_capability.detected_chipset", return_value="x2-elite"):
+            assert ModelType.WHISPER_NPU.is_available() is True
+
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="ARM64"), \
+             patch("buzz.npu_capability.is_npu_transcription_available", return_value=False), \
+             patch("buzz.npu_capability.detected_chipset", return_value="x2-elite"):
+            assert ModelType.WHISPER_NPU.is_available() is False
+
+        with patch("platform.system", return_value="Windows"), \
+             patch("platform.machine", return_value="ARM64"), \
+             patch("buzz.npu_capability.is_npu_transcription_available", return_value=True), \
+             patch("buzz.npu_capability.detected_chipset", return_value=None):
+            assert ModelType.WHISPER_NPU.is_available() is False
+
+
+class TestWhisperNpuGetLocalModelPath:
+    def test_none_when_incomplete(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        model = TranscriptionModel(model_type=ModelType.WHISPER_NPU)
+        assert model.get_local_model_path() is None
+
+    def test_returns_dir_when_complete(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        staged = _stage_whisper_npu_asset("x2-elite")
+        model = TranscriptionModel(model_type=ModelType.WHISPER_NPU)
+        assert model.get_local_model_path() == staged
+
+    def test_none_when_chipset_undetected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: None)
+        _stage_whisper_npu_asset("x2-elite")
+        model = TranscriptionModel(model_type=ModelType.WHISPER_NPU)
+        assert model.get_local_model_path() is None
+
+
+class TestWhisperNpuDeleteLocalFile:
+    def test_removes_dir_and_cached_zip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        staged = _stage_whisper_npu_asset("x2-elite")
+        zip_path = Path(get_whisper_npu_zip_path("x2-elite"))
+        zip_path.write_bytes(b"zip")
+        model = TranscriptionModel(model_type=ModelType.WHISPER_NPU)
+        with patch.object(model, "get_local_model_path", return_value=staged):
+            model.delete_local_file()
+        assert not Path(staged).exists()
+        assert not zip_path.exists()
+
+    def test_no_path_does_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        model = TranscriptionModel(model_type=ModelType.WHISPER_NPU)
+        with patch.object(model, "get_local_model_path", return_value=None):
+            model.delete_local_file()
+
+
+class TestModelDownloaderWhisperNpu:
+    WRAPPER_DIR = ("whisper_base-precompiled_qnn_onnx-float-qualcomm"
+                   "_snapdragon_x2_elite")
+
+    def _make_downloader(self) -> ModelDownloader:
+        downloader = ModelDownloader(model=TranscriptionModel(model_type=ModelType.WHISPER_NPU))
+        downloader.signals = MagicMock()
+        return downloader
+
+    BINARY_FILES = ("encoder.onnx", "encoder.bin", "decoder.onnx", "decoder.bin")
+
+    def _asset_zip_bytes(self, wrapper_dir: str = WRAPPER_DIR,
+                         files: tuple = BINARY_FILES) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for name in files:
+                z.writestr(f"{wrapper_dir}/{name}", b"asset")
+            z.writestr(
+                f"{wrapper_dir}/metadata.json",
+                json.dumps({"runtime": "precompiled_qnn_onnx",
+                            "chipset_attributes": {"htp_version": 81}}),
+            )
+        return buf.getvalue()
+
+    def test_no_chipset_errors(self, monkeypatch):
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: None)
+        downloader = self._make_downloader()
+        downloader.run()
+        downloader.signals.error.emit.assert_called_once()
+        downloader.signals.finished.emit.assert_not_called()
+
+    def test_complete_asset_short_circuits(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        staged = _stage_whisper_npu_asset("x2-elite")
+        downloader = self._make_downloader()
+        downloader.run()
+        downloader.signals.finished.emit.assert_called_once_with(staged)
+
+    def test_downloads_then_extracts_flat(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        downloader = self._make_downloader()
+        zip_bytes = self._asset_zip_bytes()
+
+        def fake_download_model(url, file_path, expected_sha256):
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "wb") as f:
+                f.write(zip_bytes)
+            return True
+
+        with patch.object(downloader, "download_model",
+                          side_effect=fake_download_model) as mock_dl:
+            downloader.run()
+
+        mock_dl.assert_called_once()
+        assert mock_dl.call_args.kwargs["url"] == WHISPER_NPU_ASSETS["x2-elite"]["url"]
+        assert mock_dl.call_args.kwargs["expected_sha256"] == \
+            WHISPER_NPU_ASSETS["x2-elite"]["sha256"]
+        model_dir = Path(get_whisper_npu_model_dir("x2-elite"))
+        assert (model_dir / "metadata.json").exists()
+        assert (model_dir / "encoder.bin").exists()
+        # The zip's wrapper dir must not leak into the model dir
+        assert not (model_dir / self.WRAPPER_DIR).exists()
+        downloader.signals.finished.emit.assert_called_once_with(str(model_dir))
+
+    def test_cached_zip_reused_without_download(self, tmp_path, monkeypatch):
+        import hashlib
+
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        downloader = self._make_downloader()
+        zip_bytes = self._asset_zip_bytes()
+        # The reuse short-circuit only fires when the cached zip hashes to the
+        # pinned sha256, so pin the fake zip's own hash for this test.
+        monkeypatch.setitem(WHISPER_NPU_ASSETS["x2-elite"], "sha256",
+                            hashlib.sha256(zip_bytes).hexdigest())
+        zip_path = Path(get_whisper_npu_zip_path("x2-elite"))
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        zip_path.write_bytes(zip_bytes)
+
+        # Real download_model: HEAD size matches + sha256 matches ->
+        # already_downloaded short-circuit, no GET issued.
+        mock_head = MagicMock()
+        mock_head.headers = {"Content-Length": str(len(zip_bytes)),
+                             "Accept-Ranges": "bytes"}
+        with patch("requests.head", return_value=mock_head), \
+             patch("requests.get", side_effect=AssertionError("no download expected")):
+            downloader.run()
+
+        model_dir = Path(get_whisper_npu_model_dir("x2-elite"))
+        assert (model_dir / "metadata.json").exists()
+        downloader.signals.finished.emit.assert_called_once()
+
+    def test_corrupt_zip_errors_and_cleans_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        downloader = self._make_downloader()
+
+        def fake_download_model(url, file_path, expected_sha256):
+            with open(file_path, "wb") as f:
+                f.write(b"not a zip")
+            return True
+
+        with patch.object(downloader, "download_model", side_effect=fake_download_model):
+            downloader.run()
+
+        downloader.signals.error.emit.assert_called_once()
+        downloader.signals.finished.emit.assert_not_called()
+        assert not Path(get_whisper_npu_model_dir("x2-elite")).exists()
+
+    def test_unsafe_zip_member_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        downloader = self._make_downloader()
+        zip_bytes = self._asset_zip_bytes(wrapper_dir="..")
+        outside = Path(tmp_path) / "evil.txt"
+
+        def fake_download_model(url, file_path, expected_sha256):
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "wb") as f:
+                f.write(zip_bytes)
+            return True
+
+        with patch.object(downloader, "download_model", side_effect=fake_download_model):
+            downloader.run()
+
+        downloader.signals.error.emit.assert_called_once()
+        downloader.signals.finished.emit.assert_not_called()
+        assert not outside.exists()
+
+    def test_incomplete_extraction_errors(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setattr("buzz.npu_capability.detected_chipset", lambda: "x2-elite")
+        downloader = self._make_downloader()
+        zip_bytes = self._asset_zip_bytes(files=("encoder.onnx",))  # rest missing
+
+        def fake_download_model(url, file_path, expected_sha256):
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "wb") as f:
+                f.write(zip_bytes)
+            return True
+
+        with patch.object(downloader, "download_model", side_effect=fake_download_model):
+            downloader.run()
+
+        downloader.signals.error.emit.assert_called_once()
+        downloader.signals.finished.emit.assert_not_called()
 
 
 class TestModelLoaderCertifiImportError:

@@ -123,6 +123,72 @@ os.makedirs(model_root_dir, exist_ok=True)
 
 logging.debug("Model root directory: %s", model_root_dir)
 
+# --- Whisper NPU (Hexagon) model assets (P2 M1, porting/plans/P2/M1-model-management.md)
+#
+# AI Hub precompiled_qnn_onnx assets served from Qualcomm's public release
+# bucket, pinned to one release tag: a newer export changes the embedded QAIRT
+# version, and the installed qnn wheel's bundled QAIRT must stay >= the export's
+# (porting/plans/P2-npu-benchmark-report.md §7 rule 2). Bumping the release
+# requires re-hashing the zips and re-checking that coupling.
+WHISPER_NPU_ASSET_RELEASE = "v0.66.0"
+
+WHISPER_NPU_ASSETS = {
+    "x2-elite": {
+        "url": (
+            "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models"
+            "/models/whisper_base/releases/v0.66.0"
+            "/whisper_base-precompiled_qnn_onnx-float-qualcomm_snapdragon_x2_elite.zip"
+        ),
+        "sha256": "9275d08c14f041a776539a1556aab49c36116e121894b4c507487fdfae1d00f0",
+        "zip_bytes": 180799393,
+        "htp_version": 81,
+    },
+    "x-elite": {
+        "url": (
+            "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models"
+            "/models/whisper_base/releases/v0.66.0"
+            "/whisper_base-precompiled_qnn_onnx-float-qualcomm_snapdragon_x_elite.zip"
+        ),
+        "sha256": "9e3330fed98017750923d95ef96fb70fe34a318e214fa40c520cee6d81686fc2",
+        "zip_bytes": 180670140,
+        "htp_version": 73,
+    },
+}
+
+WHISPER_NPU_ASSET_FILES = (
+    "encoder.onnx", "encoder.bin", "decoder.onnx", "decoder.bin", "metadata.json",
+)
+
+
+def get_whisper_npu_zip_path(chipset: str) -> str:
+    return os.path.join(model_root_dir, "whisper-npu", f"{chipset}.zip")
+
+
+def get_whisper_npu_model_dir(chipset: str) -> str:
+    return os.path.join(model_root_dir, "whisper-npu", chipset)
+
+
+def whisper_npu_asset_is_complete(chipset: str) -> bool:
+    """True when the extracted asset has all files and its metadata matches."""
+    asset = WHISPER_NPU_ASSETS.get(chipset)
+    if asset is None:
+        return False
+    model_dir = get_whisper_npu_model_dir(chipset)
+    if not all(os.path.isfile(os.path.join(model_dir, name)) for name in WHISPER_NPU_ASSET_FILES):
+        return False
+    try:
+        import json
+
+        with open(os.path.join(model_dir, "metadata.json"), encoding="utf-8") as f:
+            metadata = json.load(f)
+        return (
+            metadata.get("runtime") == "precompiled_qnn_onnx"
+            and (metadata.get("chipset_attributes") or {}).get("htp_version")
+            == asset["htp_version"]
+        )
+    except (OSError, ValueError):
+        return False
+
 DOWNLOAD_COMPLETE_MARKER = ".buzz_complete"
 
 class WhisperModelSize(str, enum.Enum):
@@ -180,6 +246,7 @@ class ModelType(enum.Enum):
     FASTER_WHISPER = "Faster Whisper"
     WHISPER = "OpenAI Whisper"
     OPEN_AI_WHISPER_API = "OpenAI Whisper API"
+    WHISPER_NPU = "Whisper NPU"
 
     @classmethod
     def _missing_(cls, value):
@@ -207,6 +274,17 @@ class ModelType(enum.Enum):
                 and platform.system() == "Darwin" and platform.machine() == "x86_64")
         ):
             return False
+        if self == ModelType.WHISPER_NPU:
+            # Only offer the Hexagon NPU engine on Windows ARM64 machines with a
+            # supported Snapdragon chipset and a working QNN stack (P2 M0/M1).
+            from buzz.npu_capability import detected_chipset, is_npu_transcription_available
+
+            return (
+                platform.system() == "Windows"
+                and platform.machine() == "ARM64"
+                and is_npu_transcription_available()
+                and detected_chipset() in WHISPER_NPU_ASSETS
+            )
         return True
 
     def is_manually_downloadable(self):
@@ -474,6 +552,8 @@ class TranscriptionModel:
                 return f"Faster Whisper ({self.whisper_model_size})"
             case ModelType.OPEN_AI_WHISPER_API:
                 return "OpenAI Whisper API"
+            case ModelType.WHISPER_NPU:
+                return "Whisper NPU"
             case _:
                 raise Exception("Unknown model type")
 
@@ -482,6 +562,7 @@ class TranscriptionModel:
             self.model_type == ModelType.WHISPER
             or self.model_type == ModelType.WHISPER_CPP
             or self.model_type == ModelType.FASTER_WHISPER
+            or self.model_type == ModelType.WHISPER_NPU
         ) and self.get_local_model_path() is not None
 
     def open_file_location(self):
@@ -583,6 +664,18 @@ class TranscriptionModel:
                     shutil.rmtree(coreml_dir, ignore_errors=True)
             return
 
+        if self.model_type == ModelType.WHISPER_NPU:
+            # model_path is the extracted asset dir; also drop the cached zip.
+            if model_path is None:
+                return
+            chipset = os.path.basename(model_path)
+            logging.debug("Deleting NPU model asset directory: %s", model_path)
+            shutil.rmtree(model_path, ignore_errors=True)
+            zip_path = get_whisper_npu_zip_path(chipset)
+            if os.path.isfile(zip_path):
+                os.remove(zip_path)
+            return
+
         logging.debug("Deleting model file: %s", model_path)
         os.remove(model_path)
 
@@ -647,6 +740,14 @@ class TranscriptionModel:
             if not _snapshot_is_complete(snapshot_path):
                 return None
             return snapshot_path
+
+        if self.model_type == ModelType.WHISPER_NPU:
+            from buzz.npu_capability import detected_chipset
+
+            chipset = detected_chipset()
+            if chipset is not None and whisper_npu_asset_is_complete(chipset):
+                return get_whisper_npu_model_dir(chipset)
+            return None
 
         raise Exception("Unknown model type")
 
@@ -1045,6 +1146,80 @@ class ModelDownloader(QRunnable):
     def _download_openai_whisper_api(self) -> None:
         self.signals.finished.emit("")
 
+    def _download_whisper_npu(self) -> None:
+        from buzz.npu_capability import detected_chipset
+
+        chipset = detected_chipset()
+        asset = WHISPER_NPU_ASSETS.get(chipset)
+        if asset is None:
+            self.signals.error.emit(_("No supported Qualcomm NPU chipset detected"))
+            return
+
+        model_dir = get_whisper_npu_model_dir(chipset)
+        if whisper_npu_asset_is_complete(chipset):
+            self.signals.finished.emit(model_dir)
+            return
+
+        zip_path = get_whisper_npu_zip_path(chipset)
+        try:
+            # download_model resumes, short-circuits on an already-verified zip,
+            # and raises on a hash mismatch (file removed) — it does not emit
+            # signals; this method emits finished exactly once, with the
+            # extracted dir, like the other branches.
+            self.download_model(
+                url=asset["url"], file_path=zip_path, expected_sha256=asset["sha256"]
+            )
+        except requests.RequestException:
+            self.signals.error.emit(_("A connection error occurred"))
+            logging.exception("NPU asset download failed")
+            return
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+            logging.exception("NPU asset download failed")
+            return
+
+        if self.stopped:
+            return
+
+        try:
+            self._extract_whisper_npu_asset(zip_path, model_dir)
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+            logging.exception("NPU asset extraction failed")
+            shutil.rmtree(model_dir, ignore_errors=True)
+            return
+
+        if not whisper_npu_asset_is_complete(chipset):
+            self.signals.error.emit(_("NPU model asset failed verification"))
+            return
+
+        self.signals.finished.emit(model_dir)
+
+    @staticmethod
+    def _extract_whisper_npu_asset(zip_path: str, model_dir: str) -> None:
+        """Extract the asset zip's contents (not its wrapper dir) into model_dir."""
+        import tempfile
+
+        os.makedirs(model_dir, exist_ok=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(zip_path) as zf:
+                model_dir_abs = os.path.abspath(model_dir)
+                for member in zf.infolist():
+                    target = os.path.abspath(os.path.join(model_dir_abs, member.filename))
+                    if not target.startswith(model_dir_abs + os.sep):
+                        raise ValueError(
+                            f"Unsafe path in NPU asset zip: {member.filename}"
+                        )
+                zf.extractall(temp_dir)
+
+            contents = os.listdir(temp_dir)
+            if len(contents) == 1 and os.path.isdir(os.path.join(temp_dir, contents[0])):
+                source_dir = os.path.join(temp_dir, contents[0])
+            else:
+                source_dir = temp_dir
+            for item in os.listdir(source_dir):
+                shutil.move(os.path.join(source_dir, item), os.path.join(model_dir, item))
+
     def run(self) -> None:
         logging.debug("Downloading model: %s, %s", self.model,
                       self.model.hugging_face_model_id)
@@ -1059,6 +1234,8 @@ class ModelDownloader(QRunnable):
             self._download_hugging_face()
         elif self.model.model_type == ModelType.OPEN_AI_WHISPER_API:
             self._download_openai_whisper_api()
+        elif self.model.model_type == ModelType.WHISPER_NPU:
+            self._download_whisper_npu()
         else:
             raise Exception("Invalid model type: " + self.model.model_type.value)
 
