@@ -265,6 +265,9 @@ def patch_engine(monkeypatch, audio, open_session):
     monkeypatch.setattr(whisper_npu, "_open_qnn_session", open_session)
     monkeypatch.setattr(whisper_npu, "_pin_blas_threads", lambda: None)
     monkeypatch.setattr(whisper_npu, "_maybe_pin_affinity", lambda: None)
+    # Keep unit tests hermetic: the file path would otherwise download the
+    # real Silero VAD model; these tests exercise the windowed fallback.
+    monkeypatch.setattr(whisper_npu.WhisperNpu, "_load_vad", staticmethod(lambda: None))
 
 
 class TestTranscribeEndToEnd:
@@ -645,3 +648,101 @@ class TestProgressReporting:
         monkeypatch.setattr(sys, "stderr", stub)
         whisper_npu._report_progress(42)
         assert stub.lines == ["42%" + chr(10)]
+
+
+class TestSpeechSpans:
+    @staticmethod
+    def probs(spec):
+        """spec: list of (seconds, probability) runs expanded to 32 ms chunks."""
+        out = []
+        for seconds, prob in spec:
+            out.extend([prob] * int(seconds * 16000 / 512))
+        return out
+
+    def test_hysteresis_enter_exit(self):
+        # Enters at >= 0.5, holds until < 0.35 (0.4 keeps speech alive)
+        spans = whisper_npu._speech_spans(self.probs([(1.0, 0.1), (1.0, 0.6),
+                                          (1.0, 0.4), (1.0, 0.1)]))
+        assert len(spans) == 1
+        # first chunk at >= 0.5 is chunk 31 (1 s -> 31 truncated 32 ms chunks),
+        # minus the 0.15 s boundary padding
+        assert spans[0][0] == 31 * 512 / 16000 - 0.15
+
+    def test_short_gap_merged(self):
+        spans = whisper_npu._speech_spans(self.probs([(1.0, 0.9), (0.3, 0.05),
+                                          (1.0, 0.9), (1.0, 0.05)]))
+        assert len(spans) == 1  # 0.3 s gap < 0.5 s -> one span
+
+    def test_long_gap_kept_separate(self):
+        spans = whisper_npu._speech_spans(self.probs([(1.0, 0.9), (1.0, 0.05),
+                                          (1.0, 0.9), (1.0, 0.05)]))
+        assert len(spans) == 2
+
+    def test_blip_dropped(self):
+        assert whisper_npu._speech_spans(self.probs([(0.1, 0.9), (2.0, 0.05)])) == []
+
+    def test_long_run_hard_split_at_28s(self):
+        spans = whisper_npu._speech_spans(self.probs([(40.0, 0.9), (1.0, 0.05)]))
+        assert len(spans) == 2
+        assert abs(spans[0][1] - spans[0][0] - 28.0) < 0.1
+
+    def test_padding_within_bounds(self):
+        spans = whisper_npu._speech_spans(self.probs([(0.5, 0.05), (2.0, 0.9), (0.5, 0.05)]))
+        assert spans[0][0] >= 0.0
+
+
+class TestUtteranceMode:
+    """utterance_split=True decodes VAD spans as independent utterances."""
+
+    @staticmethod
+    def patch_vad(monkeypatch, spans):
+        class FakeVad:
+            def speech_probs(self, audio):
+                return []
+
+        monkeypatch.setattr(whisper_npu.WhisperNpu, "_load_vad",
+                            staticmethod(lambda: FakeVad()))
+        monkeypatch.setattr(whisper_npu, "_speech_spans",
+                            lambda probs: spans)
+
+    def test_segments_carry_utterance_offsets(self, tokenizer, tmp_path, monkeypatch):
+        audio = np.zeros(16000 * 61, dtype=np.float32)  # 61 s
+        # two VAD spans: 0-2 s and 30-33 s; each decodes one timed phrase
+        # explicit language -> forced [SOT, en, transcribe]: the two forced
+        # steps consume None pass-throughs. One decoder session serves all
+        # utterances (the model builds it once); EOT ids separate the scripts.
+        queue = ([None, None, ts_id(0.0)] + text_ids(tokenizer, "Hey")
+                 + [ts_id(1.0), EOT]
+                 + [None, None, ts_id(0.0)] + text_ids(tokenizer, "Ho")
+                 + [ts_id(2.0), EOT])
+        dec = FakeDecoderSession(queue)
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return dec
+
+        patch_engine(monkeypatch, audio, open_session)
+        self.patch_vad(monkeypatch, [(0.0, 2.0), (30.0, 33.0)])
+
+        segments = WhisperNpu.transcribe(make_task(tmp_path, language="en"))
+        assert [(s.start, s.end, s.text) for s in segments] == [
+            (0, 1000, "Hey"), (30000, 32000, "Ho")]
+
+    def test_vad_missing_falls_back_to_windows(self, tokenizer, tmp_path, monkeypatch):
+        # patch_engine already forces _load_vad -> None; utterance_split=True
+        # must behave exactly like the plain windowed path.
+        audio = np.zeros(16000 * 61, dtype=np.float32)
+        calls = ([ts_id(0.0)] + text_ids(tokenizer, "First") + [ts_id(2.0), EOT]
+                 + [ts_id(0.0)] + text_ids(tokenizer, "Second") + [ts_id(3.0), EOT])
+        dec = FakeDecoderSession(calls)
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return dec
+
+        patch_engine(monkeypatch, audio, open_session)
+        segments = WhisperNpu.transcribe(make_task(tmp_path))
+        assert [(s.start, s.end, s.text) for s in segments] == [
+            (0, 2000, "First"), (30000, 33000, "Second")]

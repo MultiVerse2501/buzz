@@ -399,6 +399,131 @@ class _NpuCtcEmissions:
         return np.concatenate(windows, axis=0) if windows else np.zeros((0, 32), np.float32)
 
 
+_SILERO_VAD_URL = (
+    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+)
+_SILERO_VAD_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+VAD_SAMPLES_PER_CHUNK = 512  # 32 ms at 16 kHz
+VAD_CONTEXT_SAMPLES = 64  # prepended to every chunk (v5 feeding contract)
+VAD_SPEECH_ENTER = 0.5
+VAD_SPEECH_EXIT = 0.35
+VAD_MAX_MERGE_GAP_S = 0.9  # tuned on librispeech_long vs reference (see plans)
+VAD_MIN_SPEECH_S = 0.2
+VAD_PAD_S = 0.15
+MAX_UTTERANCE_S = 28  # one decode window per utterance
+
+
+def _ensure_vad_onnx() -> Optional[str]:
+    """Path to the Silero VAD model, downloading it on first use.
+
+    Returns None when the model is unavailable (the caller decodes plain
+    30-s windows instead): VAD is a quality enhancement, never a failure.
+    """
+    import hashlib
+
+    try:
+        from buzz.model_loader import model_root_dir
+
+        vad_dir = os.path.join(model_root_dir, "silero-vad")
+        vad_path = os.path.join(vad_dir, "silero_vad.onnx")
+        if os.path.isfile(vad_path):
+            return vad_path
+        os.makedirs(vad_dir, exist_ok=True)
+        import requests
+
+        response = requests.get(_SILERO_VAD_URL, timeout=60)
+        response.raise_for_status()
+        data = response.content
+        if hashlib.sha256(data).hexdigest() != _SILERO_VAD_SHA256:
+            raise RuntimeError("Silero VAD download failed the sha256 check")
+        with open(vad_path, "wb") as f:
+            f.write(data)
+        return vad_path
+    except Exception:
+        logger.warning("Silero VAD unavailable; using plain 30-s windows", exc_info=True)
+        return None
+
+
+class _SileroVad:
+    """Speech probability per 32-ms chunk of 16 kHz float32 mono audio.
+
+    Silero v5 feeding contract: every chunk is fed as [1, 64 + 512] -- a
+    64-sample context prepended to the new samples -- together with the
+    recurrent state; the output is the speech probability for the chunk.
+    """
+
+    def __init__(self, onnx_path: str):
+        import numpy as np
+        import onnxruntime as ort
+
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            onnx_path, sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        self._np = np
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._context = np.zeros((1, VAD_CONTEXT_SAMPLES), dtype=np.float32)
+
+    def speech_probs(self, audio) -> List[float]:
+        np = self._np
+        sr = np.array(WHISPER_SAMPLE_RATE, dtype=np.int64)
+        probs = []
+        for start in range(0, len(audio) - VAD_SAMPLES_PER_CHUNK + 1,
+                           VAD_SAMPLES_PER_CHUNK):
+            chunk = audio[start: start + VAD_SAMPLES_PER_CHUNK].reshape(1, -1)
+            feed_input = np.concatenate([self._context, chunk], axis=1)
+            output, self._state = self.session.run(None, {
+                "input": feed_input, "state": self._state, "sr": sr,
+            })
+            probs.append(float(output[0][0]))
+            self._context = chunk[:, -VAD_CONTEXT_SAMPLES:]
+        return probs
+
+
+def _speech_spans(probs: List[float]) -> List[tuple]:
+    """(start_s, end_s) speech spans from per-32-ms-chunk probabilities.
+
+    Hysteresis (enter >= 0.5, hold until < 0.35), short gaps merged
+    (mid-sentence pauses), blips dropped, boundaries padded, and long runs
+    hard-split so every utterance fits one decode window.
+    """
+    seconds_per_chunk = VAD_SAMPLES_PER_CHUNK / WHISPER_SAMPLE_RATE
+    spans = []
+    start = None
+    for index, prob in enumerate(probs):
+        time_s = index * seconds_per_chunk
+        if start is None:
+            if prob >= VAD_SPEECH_ENTER:
+                start = time_s
+        elif prob < VAD_SPEECH_EXIT:
+            spans.append((start, time_s))
+            start = None
+    if start is not None:
+        spans.append((start, len(probs) * seconds_per_chunk))
+
+    merged = []
+    for span in spans:
+        if merged and span[0] - merged[-1][1] <= VAD_MAX_MERGE_GAP_S:
+            merged[-1] = (merged[-1][0], span[1])
+        else:
+            merged.append(span)
+    merged = [s for s in merged if s[1] - s[0] >= VAD_MIN_SPEECH_S]
+
+    result = []
+    for span_start, span_end in merged:
+        span_start = max(0.0, span_start - VAD_PAD_S)
+        span_end += VAD_PAD_S
+        parts = int(-(-(span_end - span_start) // MAX_UTTERANCE_S))
+        for part in range(parts):
+            result.append((
+                span_start + part * MAX_UTTERANCE_S,
+                min(span_end, span_start + (part + 1) * MAX_UTTERANCE_S),
+            ))
+    return result
+
+
 class WhisperNpu:
     @staticmethod
     def transcribe(task: FileTranscriptionTask) -> List[Segment]:
@@ -409,23 +534,49 @@ class WhisperNpu:
         from buzz import whisper_audio
 
         audio = whisper_audio.load_audio(task.file_path)
-        segments = WhisperNpu.transcribe_audio(model, audio, task.transcription_options)
+        segments = WhisperNpu.transcribe_audio(
+            model, audio, task.transcription_options, utterance_split=True
+        )
         if task.transcription_options.word_level_timings:
             return WhisperNpu._word_level_segments(audio, segments, task.transcription_options)
         return segments
 
     @classmethod
-    def transcribe_audio(cls, model: _NpuWhisperModel, audio, options) -> List[Segment]:
-        """Windowed decode of 16 kHz float32 mono audio with a loaded model.
+    def transcribe_audio(cls, model: _NpuWhisperModel, audio, options,
+                         utterance_split: bool = False) -> List[Segment]:
+        """Decode 16 kHz float32 mono audio with a loaded model.
 
-        Split from transcribe() so callers that already hold samples (the
-        recording path in M4, batch verification) reuse one loaded model.
+        utterance_split=True decodes VAD-detected speech spans as independent
+        utterances (file transcription: utterance boundaries restore the
+        per-utterance accuracy the plain windows lose); the default plain
+        30-s windows serve the recording path and any caller that already
+        holds stream chunks. VAD unavailability silently falls back to the
+        plain windows.
         """
         task_kind = options.task
         language = options.language or None
 
-        total_windows = max(1, -(-len(audio) // (WHISPER_SAMPLE_RATE * WINDOW_SECONDS)))
+        spans = None
+        if utterance_split:
+            vad = WhisperNpu._load_vad()
+            if vad is not None:
+                spans = _speech_spans(vad.speech_probs(audio))
+
         segments: List[Segment] = []
+        if spans:
+            total_s = max(1.0, len(audio) / WHISPER_SAMPLE_RATE)
+            for start_s, end_s in spans:
+                start_sample = int(start_s * WHISPER_SAMPLE_RATE)
+                window = audio[start_sample: int(end_s * WHISPER_SAMPLE_RATE)]
+                segments.extend(cls._decode_window(
+                    model, window, language, task_kind,
+                    offset_ms=int(start_s * 1000),
+                    label=f"utterance at {start_s:.1f}s",
+                ))
+                _report_progress(int(100 * min(1.0, end_s / total_s)))
+            return segments
+
+        total_windows = max(1, -(-len(audio) // (WHISPER_SAMPLE_RATE * WINDOW_SECONDS)))
         for window_index in range(total_windows):
             window = audio[
                 window_index * WHISPER_SAMPLE_RATE * WINDOW_SECONDS:
@@ -433,45 +584,65 @@ class WhisperNpu:
             ]
             if len(window) == 0:
                 continue
-            if len(window) < WHISPER_SAMPLE_RATE * WINDOW_SECONDS:
-                window = _pad(window, WHISPER_SAMPLE_RATE * WINDOW_SECONDS)
-
-            features = model.feature_extractor(
-                window, sampling_rate=WHISPER_SAMPLE_RATE, return_tensors="np"
-            )["input_features"].astype("float16")
-            cross_attention = model.encode(features)
-
-            prefix, suppress = WhisperNpu._build_prefix(
-                model, language, task_kind, cross_attention
-            )
-            token_ids = model.decode(prefix, cross_attention, suppress)
-
-            # Hallucination-loop guard: a full-length decode never sampled EOT
-            # (EOT always breaks before appending), and repetitive text on top
-            # of that is the observed loop signature (e.g. forced language on
-            # a music intro → "(gentle music)" to the cap). Drop the window;
-            # the cap already bounds the damage. Cap-hit with varied text is
-            # dense legit speech and stays (trailing flush at the window end).
-            if len(token_ids) >= DECODE_LEN and WhisperNpu._is_repetitive_text(model, token_ids):
-                logger.warning(
-                    "NPU decode hit the token cap with repetitive text "
-                    "(window %d); dropping the window", window_index)
-                _report_progress(int(100 * (window_index + 1) / total_windows))
-                continue
-
-            offset_ms = window_index * WINDOW_SECONDS * 1000
-            segments.extend(
-                WhisperNpu._segments_from_token_stream(
-                    model=model,
-                    token_ids=token_ids,
-                    offset_ms=offset_ms,
-                    window_ms=WINDOW_SECONDS * 1000,
-                )
-            )
+            segments.extend(cls._decode_window(
+                model, window, language, task_kind,
+                offset_ms=window_index * WINDOW_SECONDS * 1000,
+                label=f"window {window_index}",
+            ))
             # The worker's stderr is regex-parsed by the parent for progress.
             _report_progress(int(100 * (window_index + 1) / total_windows))
 
         return segments
+
+    @staticmethod
+    def _load_vad():
+        onnx_path = _ensure_vad_onnx()
+        if onnx_path is None:
+            return None
+        try:
+            return _SileroVad(onnx_path)
+        except Exception:
+            logger.warning("Silero VAD failed to load; using plain 30-s windows",
+                           exc_info=True)
+            return None
+
+    @classmethod
+    def _decode_window(cls, model: _NpuWhisperModel, window, language: Optional[str],
+                       task_kind, offset_ms: int, label: str) -> List[Segment]:
+        """Decode one padded 30-s window; Segments carry `offset_ms`."""
+        if len(window) == 0:
+            return []
+        if len(window) < WHISPER_SAMPLE_RATE * WINDOW_SECONDS:
+            window = _pad(window, WHISPER_SAMPLE_RATE * WINDOW_SECONDS)
+
+        features = model.feature_extractor(
+            window, sampling_rate=WHISPER_SAMPLE_RATE, return_tensors="np"
+        )["input_features"].astype("float16")
+        cross_attention = model.encode(features)
+
+        prefix, suppress = WhisperNpu._build_prefix(
+            model, language, task_kind, cross_attention
+        )
+        token_ids = model.decode(prefix, cross_attention, suppress)
+
+        # Hallucination-loop guard: a full-length decode never sampled EOT
+        # (EOT always breaks before appending), and repetitive text on top
+        # of that is the observed loop signature (e.g. forced language on
+        # a music intro → "(gentle music)" to the cap). Drop the window;
+        # the cap already bounds the damage. Cap-hit with varied text is
+        # dense legit speech and stays (trailing flush at the window end).
+        if len(token_ids) >= DECODE_LEN and WhisperNpu._is_repetitive_text(model, token_ids):
+            logger.warning(
+                "NPU decode hit the token cap with repetitive text (%s); dropping it",
+                label)
+            return []
+
+        return WhisperNpu._segments_from_token_stream(
+            model=model,
+            token_ids=token_ids,
+            offset_ms=offset_ms,
+            window_ms=WINDOW_SECONDS * 1000,
+        )
 
     @staticmethod
     def _build_prefix(
