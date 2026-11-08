@@ -460,3 +460,67 @@ class TestWordLevelSegments:
             lambda *a: (_ for _ in ()).throw(AssertionError("must not be called")))
         assert WhisperNpu._word_level_segments(
             np.zeros(1, dtype=np.float32), [], SimpleNamespace(language=None)) == []
+
+
+class TestNpuCtcEmissions:
+    """The w8a16 wav2vec2 emissions backend (unit: no device needed)."""
+
+    def test_discover_none_without_env(self, monkeypatch):
+        monkeypatch.delenv("BUZZ_WAV2VEC2_ALIGNER_DIR", raising=False)
+        assert whisper_npu._NpuCtcEmissions.discover() is None
+
+    def test_discover_none_when_asset_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BUZZ_WAV2VEC2_ALIGNER_DIR", str(tmp_path))
+        assert whisper_npu._NpuCtcEmissions.discover() is None
+
+    def test_preprocess_no_stars(self):
+        fn = whisper_npu._preprocess_text_no_stars
+        tokens, texts = fn("Hello world", romanize=True, language="eng")
+        assert "<star>" not in tokens
+        assert "<star>" not in texts
+        assert "h e l l o" in tokens and "w o r l d" in tokens
+
+    def test_emissions_stitching_and_dequantization(self, monkeypatch, tmp_path):
+        import json as _json
+
+        asset = tmp_path / "asset"
+        asset.mkdir()
+        metadata = {
+            "model_files": {"wav2vec2_conformer.onnx": {
+                "inputs": {"input_values": {"quantization_parameters": {
+                    "scale": 0.001, "zero_point": 1000.0}}},
+                "outputs": {"logits": {"quantization_parameters": {
+                    "scale": 0.01, "zero_point": 500.0}}}}}}
+        (asset / "metadata.json").write_text(_json.dumps(metadata))
+        (asset / "wav2vec2_conformer.onnx").write_bytes(b"x")
+
+        emissions_cls = whisper_npu._NpuCtcEmissions
+        model = emissions_cls.__new__(emissions_cls)
+        model.asset_dir = str(asset)
+        model.in_scale, model.in_zp = 0.001, 1000.0
+        model.out_scale, model.out_zp = 0.01, 500.0
+
+        class FakeSession:
+            def __init__(self):
+                self.feeds = []
+
+            def get_inputs(self):
+                return [SimpleNamespace(name="input_values")]
+
+            def run(self, _, feed):
+                self.feeds.append(feed["input_values"])
+                # quantized value 1500 -> (1500-500)*0.01 = 10.0
+                return [np.full((1, 499, 32), 1500, dtype=np.uint16)]
+
+        fake = FakeSession()
+        model.session = fake
+        model.input_name = "input_values"
+
+        audio = np.zeros(320000, dtype=np.float32)  # 20 s -> 2 windows
+        out = model.emissions(audio)
+
+        assert out.shape == (2 * 499, 32)
+        assert np.allclose(out, 10.0)
+        # Two windows advanced by the model's own frame grid
+        assert len(fake.feeds) == 2
+        assert fake.feeds[0].shape == (1, 160000)

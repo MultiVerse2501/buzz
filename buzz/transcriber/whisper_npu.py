@@ -283,6 +283,113 @@ class _NpuWhisperModel:
         return first_logits, out_ids
 
 
+_WAV2VEC2_ALIGNER_DIR_ENV = "BUZZ_WAV2VEC2_ALIGNER_DIR"
+
+
+def _preprocess_text_no_stars(text, romanize, language):
+    """``preprocess_text`` without ``<star>`` wildcard tokens.
+
+    The w8a16 wav2vec2 asset's 32-symbol vocab has no room for the wildcard id
+    the aligner appends, and single-chunk alignment (this engine's per-chunk
+    flow) does not need inter-segment wildcards.
+    """
+    from ctc_forced_aligner.ctc_forced_aligner import preprocess_text
+
+    tokens, texts = preprocess_text(text, romanize=romanize, language=language)
+    return (
+        [t for t in tokens if t != "<star>"],
+        [t for t in texts if t != "<star>"],
+    )
+
+
+class _NpuCtcEmissions:
+    """Aligner CTC emissions computed on the HTP via the w8a16 wav2vec2 asset.
+
+    Qualcomm ships the conformer-large-960h export on the same public release
+    bucket as the whisper assets. Fixed 10-s windows, 20 ms/frame; IO is
+    affine-quantized uint16 (scale/zero_point from the asset's metadata.json).
+    Windows advance by the model's own frame grid (499 frames x 320-sample
+    stride) so the stitched frame timeline has no cumulative drift.
+    """
+
+    WINDOW_SAMPLES = 160000
+    WINDOW_STRIDE_SAMPLES = 159680  # 499 frames x 320-sample model stride
+    FRAMES_PER_WINDOW = 499
+    STRIDE_MS = 20.0
+
+    def __init__(self, asset_dir: str):
+        import json
+
+        import onnxruntime as ort
+
+        from buzz.npu_capability import get_qnn_ep_devices
+
+        self.asset_dir = asset_dir
+        with open(os.path.join(asset_dir, "metadata.json"), encoding="utf-8") as f:
+            metadata = json.load(f)
+        io_spec = metadata["model_files"]["wav2vec2_conformer.onnx"]
+        quant = io_spec["inputs"]["input_values"]["quantization_parameters"]
+        self.in_scale, self.in_zp = quant["scale"], quant["zero_point"]
+        quant = io_spec["outputs"]["logits"]["quantization_parameters"]
+        self.out_scale, self.out_zp = quant["scale"], quant["zero_point"]
+
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        session_options.add_provider_for_devices(
+            get_qnn_ep_devices(), QNN_PROVIDER_OPTIONS
+        )
+        self.session = ort.InferenceSession(
+            os.path.join(asset_dir, "wav2vec2_conformer.onnx"),
+            sess_options=session_options,
+        )
+        self.input_name = self.session.get_inputs()[0].name
+
+    @classmethod
+    def discover(cls) -> Optional["_NpuCtcEmissions"]:
+        """The configured aligner asset, or None (caller falls back to CPU).
+
+        Point ``BUZZ_WAV2VEC2_ALIGNER_DIR`` at an extracted
+        wav2vec2_conformer-precompiled_qnn_onnx-w8a16-* directory. Download /
+        bundling of this asset is not productized yet — without it the aligner
+        runs its acoustic model on CPU (MMS-300m) exactly as before.
+        """
+        asset_dir = os.getenv(_WAV2VEC2_ALIGNER_DIR_ENV)
+        if not asset_dir or not os.path.isfile(
+            os.path.join(asset_dir, "wav2vec2_conformer.onnx")
+        ):
+            return None
+        try:
+            return cls(asset_dir)
+        except Exception:
+            logger.warning("NPU aligner asset failed to load", exc_info=True)
+            return None
+
+    def emissions(self, audio):
+        """Stitched (frames, 32) float32 logits for 16 kHz float32 mono audio."""
+        import numpy as np
+
+        windows = []
+        for start in range(0, len(audio), self.WINDOW_STRIDE_SAMPLES):
+            window = audio[start: start + self.WINDOW_SAMPLES]
+            if len(window) < 1600:  # <0.1 s tail: nothing alignable
+                break
+            window = (window - window.mean()) / np.sqrt(window.var() + 1e-7)
+            padded = np.zeros(self.WINDOW_SAMPLES, dtype=np.float32)
+            padded[: len(window)] = window
+            q = np.round(
+                padded.reshape(1, -1) / self.in_scale + self.in_zp
+            ).clip(0, 65535).astype(np.uint16)
+            logits = self.session.run(None, {self.input_name: q})[0][0]
+            windows.append(
+                (logits.astype(np.float32) - self.out_zp) * self.out_scale
+            )
+            if len(window) < self.WINDOW_SAMPLES:
+                break
+        return np.concatenate(windows, axis=0) if windows else np.zeros((0, 32), np.float32)
+
+
 class WhisperNpu:
     @staticmethod
     def transcribe(task: FileTranscriptionTask) -> List[Segment]:
@@ -420,7 +527,14 @@ class WhisperNpu:
 
     @staticmethod
     def _align_words(audio, segments: List[Segment], language: str) -> List[dict]:
-        """Run the vendored CTC aligner over the NPU segments; raises on failure."""
+        """Run the vendored CTC aligner over the NPU segments; raises on failure.
+
+        The acoustic-model pass is language-gated: English uses the w8a16
+        wav2vec2 asset on the HTP when it is available (configured via
+        ``BUZZ_WAV2VEC2_ALIGNER_DIR``); everything else runs the multilingual
+        MMS-300m model on CPU, exactly as the speaker-identification flow does.
+        The Viterbi (forced_align C++) and the transcript handling stay shared.
+        """
         import torch
         from ctc_forced_aligner.ctc_forced_aligner import (
             generate_emissions,
@@ -434,10 +548,26 @@ class WhisperNpu:
 
         from buzz.transcriber.speaker_identifier import TranscriptAligner
 
-        model, tokenizer = load_alignment_model(device="cpu", dtype=torch.float32)
-        emissions, stride = generate_emissions(model, torch.from_numpy(audio))
+        npu_ctc = _NpuCtcEmissions.discover() if language == "en" else None
+        if npu_ctc is not None:
+            from transformers import AutoTokenizer
+
+            emissions = torch.from_numpy(npu_ctc.emissions(audio))
+            stride = npu_ctc.STRIDE_MS
+            if emissions.size(0) < 2:
+                raise RuntimeError("Audio too short to align on the NPU.")
+            tokenizer = AutoTokenizer.from_pretrained(
+                "facebook/wav2vec2-conformer-rel-pos-large-960h-ft",
+                word_delimiter_token=None,
+            )
+            preprocess_fn = _preprocess_text_no_stars
+        else:
+            model, tokenizer = load_alignment_model(device="cpu", dtype=torch.float32)
+            emissions, stride = generate_emissions(model, torch.from_numpy(audio))
+            preprocess_fn = preprocess_text
+
         aligner = TranscriptAligner(
-            preprocess_text,
+            preprocess_fn,
             get_alignments,
             get_spans,
             postprocess_results,
