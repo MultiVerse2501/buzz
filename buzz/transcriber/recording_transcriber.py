@@ -202,7 +202,15 @@ class RecordingTranscriber(QObject):
             from buzz.transcriber.whisper_npu import _NpuWhisperModel, warm_up
 
             warm_up()
-            return _NpuWhisperModel(model_path)
+            try:
+                return _NpuWhisperModel(model_path)
+            except Exception:
+                logging.exception("NPU engine failed to load for recording")
+                self.error.emit(_(
+                    "The NPU engine failed to load. Switch the model type to "
+                    "Whisper.cpp and start the recording again."
+                ))
+                return None
 
         # Only the backends that run in this process need torch
         import torch

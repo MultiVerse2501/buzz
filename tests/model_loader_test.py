@@ -237,6 +237,7 @@ class TestModelType:
         assert ModelType.FASTER_WHISPER.is_manually_downloadable() is True
         assert ModelType.HUGGING_FACE.is_manually_downloadable() is False
         assert ModelType.OPEN_AI_WHISPER_API.is_manually_downloadable() is False
+        assert ModelType.WHISPER_NPU.is_manually_downloadable() is True
 
 
 class TestTranscriptionModel:

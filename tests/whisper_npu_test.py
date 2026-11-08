@@ -524,3 +524,75 @@ class TestNpuCtcEmissions:
         # Two windows advanced by the model's own frame grid
         assert len(fake.feeds) == 2
         assert fake.feeds[0].shape == (1, 160000)
+
+
+class TestNpuFallback:
+    """File-path fallback to whisper.cpp when the NPU engine fails."""
+
+    @staticmethod
+    def make_task():
+        return FileTranscriptionTask(
+            transcription_options=TranscriptionOptions(
+                model=TranscriptionModel(model_type=ModelType.WHISPER_NPU)),
+            file_transcription_options=FileTranscriptionOptions(),
+            model_path="fake-asset-dir",
+        )
+
+    def test_falls_back_to_whisper_cpp_with_replaced_model_path(self, monkeypatch):
+        from buzz.transcriber import whisper_file_transcriber as wft
+        from buzz.transcriber.transcriber import Segment
+
+        def failing_npu(task):
+            raise RuntimeError("QNN context load failed")
+
+        seen = {}
+
+        def fake_whisper_cpp(task):
+            seen["model_path"] = task.model_path
+            return [Segment(start=0, end=100, text="via whisper.cpp")]
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu.transcribe",
+            staticmethod(failing_npu))
+        monkeypatch.setattr(wft.WhisperCpp, "transcribe", staticmethod(fake_whisper_cpp))
+        monkeypatch.setattr(
+            wft.WhisperFileTranscriber, "_whisper_cpp_fallback_model_path",
+            staticmethod(lambda: "/models/ggml-base.bin"))
+
+        out = wft.WhisperFileTranscriber.transcribe_whisper_npu(self.make_task())
+
+        assert [s.text for s in out] == ["via whisper.cpp"]
+        assert seen["model_path"] == "/models/ggml-base.bin"
+        # every other field of the task is preserved
+        assert seen["model_path"] != "fake-asset-dir"
+
+    def test_no_fallback_model_raises_combined_error(self, monkeypatch):
+        import pytest
+
+        from buzz.transcriber import whisper_file_transcriber as wft
+
+        def failing_npu(task):
+            raise RuntimeError("QNN context load failed")
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu.transcribe",
+            staticmethod(failing_npu))
+        monkeypatch.setattr(
+            wft.WhisperFileTranscriber, "_whisper_cpp_fallback_model_path",
+            staticmethod(lambda: None))
+
+        with pytest.raises(Exception, match="QNN context load failed.*Whisper.cpp"):
+            wft.WhisperFileTranscriber.transcribe_whisper_npu(self.make_task())
+
+    def test_success_does_not_touch_fallback(self, monkeypatch):
+        from buzz.transcriber import whisper_file_transcriber as wft
+        from buzz.transcriber.transcriber import Segment
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu.transcribe",
+            staticmethod(lambda task: [Segment(start=0, end=1, text="npu")]))
+        monkeypatch.setattr(
+            wft.WhisperFileTranscriber, "_whisper_cpp_fallback_model_path",
+            staticmethod(lambda: (_ for _ in ()).throw(AssertionError("not needed"))))
+        out = wft.WhisperFileTranscriber.transcribe_whisper_npu(self.make_task())
+        assert [s.text for s in out] == ["npu"]

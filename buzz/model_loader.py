@@ -292,6 +292,7 @@ class ModelType(enum.Enum):
             ModelType.WHISPER,
             ModelType.WHISPER_CPP,
             ModelType.FASTER_WHISPER,
+            ModelType.WHISPER_NPU,
         )
 
 

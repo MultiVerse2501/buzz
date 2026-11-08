@@ -266,6 +266,10 @@ class ModelsPreferencesWidget(QWidget):
             if (self.model.model_type == ModelType.WHISPER and
                     model_size == WhisperModelSize.CUSTOM):
                 continue
+            # Whisper NPU ships exactly one compiled asset
+            if (self.model.model_type == ModelType.WHISPER_NPU and
+                    model_size != WhisperModelSize.BASE):
+                continue
 
             # Whisper.cpp custom models are listed individually below, not as a
             # single generic "Custom" entry.

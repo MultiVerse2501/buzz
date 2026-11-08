@@ -634,3 +634,23 @@ class TestWhisperNpuRecording:
 
         # The model path flows into the encoder session open.
         assert any("encoder.onnx" in p for p in opened)
+
+
+class TestWhisperNpuLoadFailure:
+    def test_load_failure_emits_friendly_error_and_returns_none(self, monkeypatch):
+        transcriber = TestWhisperNpuRecording.make_transcriber()
+        errors = []
+        transcriber.error.connect(errors.append)
+
+        def failing_model(path):
+            raise RuntimeError("QNN session open failed")
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu._NpuWhisperModel", failing_model)
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.warm_up", lambda: None)
+
+        model = transcriber._load_model()
+
+        assert model is None
+        assert any("Whisper.cpp" in e for e in errors)

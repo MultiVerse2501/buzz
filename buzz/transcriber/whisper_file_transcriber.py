@@ -23,7 +23,9 @@ from PyQt6.QtCore import QObject
 
 from buzz import whisper_audio
 from buzz.conn import pipe_stderr
-from buzz.model_loader import ModelType, map_language_to_mms
+from dataclasses import replace
+
+from buzz.model_loader import ModelType, TranscriptionModel, WhisperModelSize, map_language_to_mms
 from buzz.transformers_whisper import TransformersTranscriber
 from buzz.transcriber.file_transcriber import FileTranscriber
 from buzz.transcriber.transcriber import FileTranscriptionTask, Segment, Task, DEFAULT_WHISPER_TEMPERATURE
@@ -325,7 +327,35 @@ class WhisperFileTranscriber(FileTranscriber):
         # EP, none of which should happen at module import or on other engines.
         from buzz.transcriber.whisper_npu import WhisperNpu
 
-        return WhisperNpu.transcribe(task)
+        try:
+            return WhisperNpu.transcribe(task)
+        except Exception as exc:
+            fallback_model_path = cls._whisper_cpp_fallback_model_path()
+            if fallback_model_path is None:
+                raise Exception(
+                    f"{exc} — the NPU engine could not run, and no Whisper.cpp "
+                    "model is downloaded to fall back on. Download a Whisper.cpp "
+                    "model (e.g. Base) and retry."
+                ) from exc
+            logging.warning(
+                "NPU engine failed (%s); falling back to Whisper.cpp model at %s",
+                exc, fallback_model_path,
+            )
+            fallback_task = replace(task, model_path=fallback_model_path)
+            return WhisperCpp.transcribe(fallback_task)
+
+    @staticmethod
+    def _whisper_cpp_fallback_model_path() -> Optional[str]:
+        """A locally available whisper.cpp model for the NPU fallback, or None.
+
+        Whisper-base matches the NPU engine's model capability; resolution is
+        local-only, so this never triggers a download inside the worker.
+        """
+        fallback_model = TranscriptionModel(
+            model_type=ModelType.WHISPER_CPP,
+            whisper_model_size=WhisperModelSize.BASE,
+        )
+        return fallback_model.get_local_model_path()
 
     @classmethod
     def transcribe_hugging_face(cls, task: FileTranscriptionTask) -> List[Segment]:
