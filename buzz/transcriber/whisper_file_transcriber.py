@@ -279,6 +279,8 @@ class WhisperFileTranscriber(FileTranscriber):
             with pipe_stderr(stderr_conn):
                 if task.transcription_options.model.model_type == ModelType.WHISPER_CPP:
                     segments = cls.transcribe_whisper_cpp(task)
+                elif task.transcription_options.model.model_type == ModelType.WHISPER_NPU:
+                    segments = cls.transcribe_whisper_npu(task)
                 elif task.transcription_options.model.model_type == ModelType.HUGGING_FACE:
                     sys.stderr.write("0%\n")
                     segments = cls.transcribe_hugging_face(task)
@@ -316,6 +318,14 @@ class WhisperFileTranscriber(FileTranscriber):
     @classmethod
     def transcribe_whisper_cpp(cls, task: FileTranscriptionTask) -> List[Segment]:
         return WhisperCpp.transcribe(task)
+
+    @classmethod
+    def transcribe_whisper_npu(cls, task: FileTranscriptionTask) -> List[Segment]:
+        # Imported lazily: pulls onnxruntime/transformers and registers the QNN
+        # EP, none of which should happen at module import or on other engines.
+        from buzz.transcriber.whisper_npu import WhisperNpu
+
+        return WhisperNpu.transcribe(task)
 
     @classmethod
     def transcribe_hugging_face(cls, task: FileTranscriptionTask) -> List[Segment]:

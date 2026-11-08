@@ -70,6 +70,15 @@ def is_npu_transcription_available() -> bool:
     return bool(_qnn_devices())
 
 
+def get_qnn_ep_devices() -> List[object]:
+    """The QNN EP devices ORT enumerated (empty when the stack is unavailable).
+
+    Callers pass these to SessionOptions.add_provider_for_devices. Registers the
+    plugin EP if that has not happened yet in this process.
+    """
+    return _qnn_devices()
+
+
 @functools.cache
 def _adreno_gpu_descriptions() -> tuple:
     """Descriptions of GPU devices the QNN EP enumerated (for chipset fallback)."""
