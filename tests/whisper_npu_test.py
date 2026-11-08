@@ -337,3 +337,68 @@ class TestTranscribeEndToEnd:
         segments = WhisperNpu.transcribe(task)
         assert [(s.start, s.end, s.text) for s in segments] == [
             (0, 500, "Bonjour")]
+
+
+class TestHallucinationLoopGuard:
+    @staticmethod
+    def _word_ids(tokenizer, words):
+        ids = []
+        for word in words:
+            # Leading space inside the phrase = real BPE Ġ tokens, so the
+            # decoded text splits into words the same way engine output does.
+            ids.extend(text_ids(tokenizer, " " + word))
+        return ids
+
+    def test_repetitive_cap_hit_is_dropped(self, tokenizer, tmp_path, monkeypatch):
+        # 199 sampled tokens of the same two words, never EOT -> cap hit with
+        # repetitive text -> the window must be dropped entirely.
+        loop_ids = self._word_ids(tokenizer, ["gentle", "music"]) * 100
+        audio = np.zeros(16000 // 2, dtype=np.float32)
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return FakeDecoderSession(loop_ids)
+
+        patch_engine(monkeypatch, audio, open_session)
+        segments = WhisperNpu.transcribe(make_task(tmp_path))
+        assert segments == []
+
+    def test_varied_cap_hit_is_kept(self, tokenizer, tmp_path, monkeypatch):
+        # Full-length decode without EOT but varied words (ratio > 0.2) is
+        # dense legit speech: kept, trailing flush at the window end.
+        vocab_words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+                       "golf", "hotel", "india", "juliett", "kilo", "lima",
+                       "mike", "november", "oscar", "papa", "quebec", "romeo",
+                       "sierra", "tango", "uniform", "victor", "whiskey",
+                       "xray", "yankee", "zulu", "east", "west", "north",
+                       "south", "river", "mountain", "forest", "desert",
+                       "ocean", "valley", "storm", "breeze", "sunrise",
+                       "sunset", "harbor", "meadow", "canyon", "island",
+                       "prairie", "tundra", "jungle", "lagoon", "summit",
+                       "ridge"]
+        varied_ids = self._word_ids(tokenizer, vocab_words) * 5
+        audio = np.zeros(16000 // 2, dtype=np.float32)
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return FakeDecoderSession(varied_ids)
+
+        patch_engine(monkeypatch, audio, open_session)
+        segments = WhisperNpu.transcribe(make_task(tmp_path))
+        assert len(segments) == 1
+        assert (segments[0].start, segments[0].end) == (0, 30_000)
+        assert len(segments[0].text.split()) > 50
+
+    def test_is_repetitive_text_thresholds(self, tokenizer):
+        model = make_model_stub(tokenizer)
+        loop = self._word_ids(tokenizer, ["gentle", "music"]) * 50
+        assert WhisperNpu._is_repetitive_text(model, loop) is True
+        varied = self._word_ids(tokenizer, [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+            "hotel", "india", "juliett", "kilo", "lima", "mike", "november",
+            "oscar", "papa", "quebec", "romeo", "sierra", "tango"]) * 3
+        assert WhisperNpu._is_repetitive_text(model, varied) is False
+        short = self._word_ids(tokenizer, ["la", "la"]) * 5
+        assert WhisperNpu._is_repetitive_text(model, short) is False  # < 12 words

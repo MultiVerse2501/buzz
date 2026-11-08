@@ -309,6 +309,21 @@ class WhisperNpu:
                 model, language, task_kind, cross_attention
             )
             token_ids = model.decode(prefix, cross_attention, suppress)
+
+            # Hallucination-loop guard: a full-length decode never sampled EOT
+            # (EOT always breaks before appending), and repetitive text on top
+            # of that is the observed loop signature (e.g. forced language on
+            # a music intro → "(gentle music)" to the cap). Drop the window;
+            # the cap already bounds the damage. Cap-hit with varied text is
+            # dense legit speech and stays (trailing flush at the window end).
+            if len(token_ids) >= DECODE_LEN and WhisperNpu._is_repetitive_text(model, token_ids):
+                logger.warning(
+                    "NPU decode hit the token cap with repetitive text "
+                    "(window %d); dropping the window", window_index)
+                sys.stderr.write(f"{int(100 * (window_index + 1) / total_windows)}%\n")
+                sys.stderr.flush()
+                continue
+
             offset_ms = window_index * WINDOW_SECONDS * 1000
             segments.extend(
                 WhisperNpu._segments_from_token_stream(
@@ -346,6 +361,18 @@ class WhisperNpu:
         if lang_id is None:
             raise ValueError(f"Unknown language for the NPU engine: {language}")
         return [model.sot, lang_id, task_id], (model.no_timestamps,)
+
+    @staticmethod
+    def _is_repetitive_text(model: _NpuWhisperModel, token_ids: List[int]) -> bool:
+        """True when the decoded text is mostly the same few words repeated.
+
+        Repetition ratio over ≥ 12 words keeps short legitimate phrases out.
+        """
+        text = model.tokenizer.decode(token_ids, skip_special_tokens=True)
+        words = text.split()
+        if len(words) < 12:
+            return False
+        return len(set(words)) / len(words) < 0.2
 
     @staticmethod
     def _segments_from_token_stream(
