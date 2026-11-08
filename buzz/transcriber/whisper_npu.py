@@ -271,15 +271,22 @@ class WhisperNpu:
         from buzz import whisper_audio
 
         audio = whisper_audio.load_audio(task.file_path)
-        options = task.transcription_options
-        task_kind = options.task
-        language = options.language
-
-        if options.word_level_timings:
+        if task.transcription_options.word_level_timings:
             logger.info(
                 "Word-level timings are not supported by the NPU engine; "
                 "producing segment-level timestamps"
             )
+        return WhisperNpu.transcribe_audio(model, audio, task.transcription_options)
+
+    @classmethod
+    def transcribe_audio(cls, model: _NpuWhisperModel, audio, options) -> List[Segment]:
+        """Windowed decode of 16 kHz float32 mono audio with a loaded model.
+
+        Split from transcribe() so callers that already hold samples (the
+        recording path in M4, batch verification) reuse one loaded model.
+        """
+        task_kind = options.task
+        language = options.language or None
 
         total_windows = max(1, -(-len(audio) // (16000 * WINDOW_SECONDS)))
         segments: List[Segment] = []
