@@ -746,3 +746,68 @@ class TestUtteranceMode:
         segments = WhisperNpu.transcribe(make_task(tmp_path))
         assert [(s.start, s.end, s.text) for s in segments] == [
             (0, 2000, "First"), (30000, 33000, "Second")]
+
+
+class TestVadGuard:
+    """Short / single-span inputs skip VAD (windowed = per-utterance there)."""
+
+    @staticmethod
+    def patch_vad_spans(monkeypatch, spans):
+        class FakeVad:
+            def speech_probs(self, audio):
+                return []
+
+        monkeypatch.setattr(whisper_npu.WhisperNpu, "_load_vad",
+                            staticmethod(lambda: FakeVad()))
+        monkeypatch.setattr(whisper_npu, "_speech_spans",
+                            lambda probs: spans)
+
+    def test_short_input_skips_vad(self, tokenizer, tmp_path, monkeypatch):
+        # 10 s audio, stub span at 2-8 s: if the guard works, decode is
+        # windowed -> segment offset 0, not the span's 2000 ms.
+        audio = np.zeros(16000 * 10, dtype=np.float32)
+        dec = FakeDecoderSession([ts_id(0.0)] + text_ids(tokenizer, "Hi") + [ts_id(1.0)])
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return dec
+
+        patch_engine(monkeypatch, audio, open_session)
+        self.patch_vad_spans(monkeypatch, [(2.0, 8.0)])
+
+        segments = WhisperNpu.transcribe(make_task(tmp_path))
+        assert [(s.start, s.text) for s in segments] == [(0, "Hi")]
+
+    def test_long_input_uses_vad_offsets(self, tokenizer, tmp_path, monkeypatch):
+        # 120 s audio, stub span at 30-32 s: guard must NOT fire; the span
+        # offset (30000) shows in the segment.
+        audio = np.zeros(16000 * 120, dtype=np.float32)
+        dec = FakeDecoderSession([ts_id(0.0)] + text_ids(tokenizer, "Hi") + [ts_id(1.0), EOT])
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return dec
+
+        patch_engine(monkeypatch, audio, open_session)
+        self.patch_vad_spans(monkeypatch, [(30.0, 32.0)])
+
+        segments = WhisperNpu.transcribe(make_task(tmp_path))
+        assert [(s.start, s.text) for s in segments] == [(30000, "Hi")]
+
+    def test_single_full_span_skips_vad(self, tokenizer, tmp_path, monkeypatch):
+        # 70 s audio with one span covering it all: windowed equivalent.
+        audio = np.zeros(16000 * 70, dtype=np.float32)
+        dec = FakeDecoderSession([ts_id(0.0)] + text_ids(tokenizer, "Yo") + [ts_id(1.0), EOT])
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return dec
+
+        patch_engine(monkeypatch, audio, open_session)
+        self.patch_vad_spans(monkeypatch, [(1.0, 69.0)])
+
+        segments = WhisperNpu.transcribe(make_task(tmp_path))
+        assert [(s.start, s.text) for s in segments] == [(0, "Yo")]
