@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -596,3 +597,51 @@ class TestNpuFallback:
             staticmethod(lambda: (_ for _ in ()).throw(AssertionError("not needed"))))
         out = wft.WhisperFileTranscriber.transcribe_whisper_npu(self.make_task())
         assert [s.text for s in out] == ["npu"]
+
+
+class TestProgressReporting:
+    """Progress lines must survive the worker's write-only stderr (ConnWriter
+    has no flush()) -- the GUI-run regression."""
+
+    def test_progress_lines_written_to_connwriter_like_stderr(
+            self, tokenizer, tmp_path, monkeypatch):
+        class ConnWriterStub:
+            def __init__(self):
+                self.lines = []
+
+            def write(self, s):
+                self.lines.append(s)
+
+        audio = np.zeros(16000 * 61, dtype=np.float32)  # 3 windows
+        scripted = [
+            [ts_id(0.0)] + text_ids(tokenizer, "First") + [ts_id(2.0)],
+            [ts_id(0.0)] + text_ids(tokenizer, "Second") + [ts_id(3.0)],
+            [],
+        ]
+
+        def open_session(path):
+            if "encoder" in path:
+                return FakeEncoderSession()
+            return FakeDecoderSession(scripted.pop(0))
+
+        patch_engine(monkeypatch, audio, open_session)
+        stub = ConnWriterStub()
+        monkeypatch.setattr(sys, "stderr", stub)
+
+        WhisperNpu.transcribe(make_task(tmp_path))
+
+        # int() truncates: 2/3 of the way through 3 windows is 66, not 67
+        assert [int(line.strip("%\n")) for line in stub.lines] == [33, 66, 100]
+
+    def test_report_progress_tolerates_missing_flush(self, monkeypatch):
+        class WriteOnly:
+            def __init__(self):
+                self.lines = []
+
+            def write(self, s):
+                self.lines.append(s)
+
+        stub = WriteOnly()
+        monkeypatch.setattr(sys, "stderr", stub)
+        whisper_npu._report_progress(42)
+        assert stub.lines == ["42%" + chr(10)]

@@ -96,6 +96,15 @@ def _open_qnn_session(model_path: str):
     return ort.InferenceSession(model_path, sess_options=session_options)
 
 
+def _report_progress(percent: int) -> None:
+    """Emit a progress line the transcription parent parses off stderr.
+
+    In the worker, sys.stderr is buzz's ConnWriter (write-only; every write is
+    one message down the multiprocessing pipe) -- never call flush() here.
+    """
+    sys.stderr.write(f"{percent}%{chr(10)}")
+
+
 def _pad(audio, target_len: int):
     """Pad a short chunk to a full 30-s window, deterministically.
 
@@ -447,8 +456,7 @@ class WhisperNpu:
                 logger.warning(
                     "NPU decode hit the token cap with repetitive text "
                     "(window %d); dropping the window", window_index)
-                sys.stderr.write(f"{int(100 * (window_index + 1) / total_windows)}%\n")
-                sys.stderr.flush()
+                _report_progress(int(100 * (window_index + 1) / total_windows))
                 continue
 
             offset_ms = window_index * WINDOW_SECONDS * 1000
@@ -461,8 +469,7 @@ class WhisperNpu:
                 )
             )
             # The worker's stderr is regex-parsed by the parent for progress.
-            sys.stderr.write(f"{int(100 * (window_index + 1) / total_windows)}%\n")
-            sys.stderr.flush()
+            _report_progress(int(100 * (window_index + 1) / total_windows))
 
         return segments
 
