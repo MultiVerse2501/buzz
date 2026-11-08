@@ -47,3 +47,12 @@ class TestCLI:
             assert len(outputs) == 2
 
         qtbot.wait_until(all_outputs_exist, timeout=5 * 60 * 1000)
+
+
+def test_whisper_npu_cli_type_maps_to_model_type():
+    from buzz.cli import CommandLineModelType
+    from buzz.model_loader import ModelType
+
+    # The CLI bridge is name-based; the NPU member must round-trip.
+    assert ModelType[CommandLineModelType.WHISPER_NPU.name] is ModelType.WHISPER_NPU
+    assert CommandLineModelType("whispernpu") is CommandLineModelType.WHISPER_NPU

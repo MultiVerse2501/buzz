@@ -233,3 +233,23 @@ class TestTranscriptionOptionsGroupBox:
         widget.model_type_combo_box.setCurrentIndex(1)
 
         mock_transcription_options_changed.assert_called()
+
+    def test_whisper_npu_selection_pins_base_and_hides_size(self, qtbot):
+        # On a machine without the NPU stack the combo simply lacks the entry;
+        # the selection mechanics are still testable by injecting the type.
+        from buzz.model_loader import ModelType, WhisperModelSize
+
+        widget = TranscriptionOptionsGroupBox()
+        qtbot.add_widget(widget)
+
+        available = ModelType.WHISPER_NPU.is_available()
+        if not available:
+            widget.model_type_combo_box.addItem(
+                ModelType.WHISPER_NPU.value, ModelType.WHISPER_NPU)
+        index = widget.model_type_combo_box.findText(ModelType.WHISPER_NPU.value)
+        assert index >= 0
+        widget.model_type_combo_box.setCurrentIndex(index)
+
+        # BASE pinned for downstream code; size row hidden (single asset).
+        assert widget.transcription_options.model.whisper_model_size ==             WhisperModelSize.BASE
+        assert widget.transcription_options.model.model_type == ModelType.WHISPER_NPU

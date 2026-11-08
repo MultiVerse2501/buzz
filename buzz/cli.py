@@ -34,6 +34,7 @@ class CommandLineModelType(enum.Enum):
     HUGGING_FACE = "huggingface"
     FASTER_WHISPER = "fasterwhisper"
     OPEN_AI_WHISPER_API = "openaiapi"
+    WHISPER_NPU = "whispernpu"
 
 
 class CommandLineDiarizer(enum.Enum):
