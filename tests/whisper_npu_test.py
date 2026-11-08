@@ -402,3 +402,61 @@ class TestHallucinationLoopGuard:
         assert WhisperNpu._is_repetitive_text(model, varied) is False
         short = self._word_ids(tokenizer, ["la", "la"]) * 5
         assert WhisperNpu._is_repetitive_text(model, short) is False  # < 12 words
+
+
+class TestWordLevelSegments:
+    """CTC-aligner wiring: dict mapping + failure fallback to segment level."""
+
+    @staticmethod
+    def make_segments():
+        from buzz.transcriber.transcriber import Segment
+
+        return [Segment(start=0, end=2000, text="Hello world"),
+                Segment(start=2000, end=4000, text="Goodbye")]
+
+    def test_word_dicts_mapped_to_segments(self, monkeypatch):
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu._align_words",
+            lambda audio, segments, language: [
+                {"text": "Hello", "start": 0.0, "end": 0.5},
+                {"text": "world", "start": 0.6, "end": 1.9},
+                {"text": "Goodbye", "start": 2.1, "end": 3.8},
+            ])
+        out = WhisperNpu._word_level_segments(
+            np.zeros(16000, dtype=np.float32), self.make_segments(),
+            SimpleNamespace(language=None))
+        assert [(s.start, s.end, s.text) for s in out] == [
+            (0, 500, "Hello"), (600, 1900, "world"), (2100, 3800, "Goodbye")]
+
+    def test_aligner_failure_falls_back_to_segments(self, monkeypatch):
+        def boom(audio, segments, language):
+            raise RuntimeError("model download failed")
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu._align_words", boom)
+        segments = self.make_segments()
+        out = WhisperNpu._word_level_segments(
+            np.zeros(16000, dtype=np.float32), segments,
+            SimpleNamespace(language="en"))
+        assert out is segments  # segment-level output preserved
+
+    def test_aligner_raises_falls_back_to_segments(self, monkeypatch):
+        from buzz.transcriber.speaker_identifier import AlignmentFailedError
+
+        def mismatch(audio, segments, language):
+            raise AlignmentFailedError("transcript does not match audio")
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu._align_words", mismatch)
+        segments = self.make_segments()
+        out = WhisperNpu._word_level_segments(
+            np.zeros(16000, dtype=np.float32), segments,
+            SimpleNamespace(language="en"))
+        assert out is segments
+
+    def test_empty_segments_short_circuit(self, monkeypatch):
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu._align_words",
+            lambda *a: (_ for _ in ()).throw(AssertionError("must not be called")))
+        assert WhisperNpu._word_level_segments(
+            np.zeros(1, dtype=np.float32), [], SimpleNamespace(language=None)) == []

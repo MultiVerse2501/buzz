@@ -293,12 +293,10 @@ class WhisperNpu:
         from buzz import whisper_audio
 
         audio = whisper_audio.load_audio(task.file_path)
+        segments = WhisperNpu.transcribe_audio(model, audio, task.transcription_options)
         if task.transcription_options.word_level_timings:
-            logger.info(
-                "Word-level timings are not supported by the NPU engine; "
-                "producing segment-level timestamps"
-            )
-        return WhisperNpu.transcribe_audio(model, audio, task.transcription_options)
+            return WhisperNpu._word_level_segments(audio, segments, task.transcription_options)
+        return segments
 
     @classmethod
     def transcribe_audio(cls, model: _NpuWhisperModel, audio, options) -> List[Segment]:
@@ -383,6 +381,72 @@ class WhisperNpu:
         if lang_id is None:
             raise ValueError(f"Unknown language for the NPU engine: {language}")
         return [model.sot, lang_id, task_id], (model.no_timestamps,)
+
+    @staticmethod
+    def _word_level_segments(audio, segments: List[Segment], options) -> List[Segment]:
+        """Word-level Segments via the vendored CTC forced aligner (plan §1).
+
+        The NPU engine's timed Segments seed the chunked aligner
+        (TranscriptAligner, reused from speaker identification) so each word
+        lands on the real audio instead of an interpolation. Any aligner
+        failure (import, model download, transcript mismatch) degrades to the
+        segment-level output with a warning — word timings are an enhancement,
+        never a failure of the transcription.
+        """
+        if not segments:
+            return segments
+        try:
+            words = WhisperNpu._align_words(
+                audio, segments, options.language or "en")
+        except Exception:
+            logger.warning(
+                "CTC word alignment failed; keeping segment-level timestamps",
+                exc_info=True,
+            )
+            return segments
+
+        if not words:
+            logger.warning("CTC word alignment produced no words; keeping segment-level timestamps")
+            return segments
+        return [
+            Segment(
+                start=int(word["start"] * 1000),
+                end=int(word["end"] * 1000),
+                text=word["text"].strip(),
+            )
+            for word in words
+            if word["text"].strip()
+        ]
+
+    @staticmethod
+    def _align_words(audio, segments: List[Segment], language: str) -> List[dict]:
+        """Run the vendored CTC aligner over the NPU segments; raises on failure."""
+        import torch
+        from ctc_forced_aligner.ctc_forced_aligner import (
+            generate_emissions,
+            get_alignments,
+            get_spans,
+            load_alignment_model,
+            postprocess_results,
+            preprocess_text,
+        )
+        from whisper_diarization.helpers import langs_to_iso
+
+        from buzz.transcriber.speaker_identifier import TranscriptAligner
+
+        model, tokenizer = load_alignment_model(device="cpu", dtype=torch.float32)
+        emissions, stride = generate_emissions(model, torch.from_numpy(audio))
+        aligner = TranscriptAligner(
+            preprocess_text,
+            get_alignments,
+            get_spans,
+            postprocess_results,
+            langs_to_iso,
+        )
+        transcript = " ".join(segment.text for segment in segments)
+        return aligner.align(
+            transcript, language, emissions, stride, tokenizer, segments=segments
+        )
 
     @staticmethod
     def _is_repetitive_text(model: _NpuWhisperModel, token_ids: List[int]) -> bool:
