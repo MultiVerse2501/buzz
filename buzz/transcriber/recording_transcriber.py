@@ -196,6 +196,14 @@ class RecordingTranscriber(QObject):
             )
             return None
 
+        if self.transcription_options.model.model_type == ModelType.WHISPER_NPU:
+            # In-process like the transformers backend, but without torch: the
+            # ORT-QNN stack is loaded once and reused for every chunk.
+            from buzz.transcriber.whisper_npu import _NpuWhisperModel, warm_up
+
+            warm_up()
+            return _NpuWhisperModel(model_path)
+
         # Only the backends that run in this process need torch
         import torch
 
@@ -261,6 +269,9 @@ class RecordingTranscriber(QObject):
         if model_type == ModelType.HUGGING_FACE:
             return self._transcribe_hugging_face(samples, model)
 
+        if model_type == ModelType.WHISPER_NPU:
+            return self._transcribe_whisper_npu(samples, model)
+
         if self.openai_client is None:
             self.error.emit(_("A connection error occurred"))
             return None
@@ -323,6 +334,29 @@ class RecordingTranscriber(QObject):
             language=language,
             task=effective_task,
         )
+
+    def _transcribe_whisper_npu(self, samples, model):
+        """Live NPU decode of one mic chunk; contract is {"text": ...}.
+
+        initial_prompt is deliberately unused (no conditioning on the NPU
+        engine). Chunks may arrive at the device sample rate — resample to the
+        engine's 16 kHz first, a 48 kHz chunk into the mel would be garbage.
+        """
+        from buzz.transcriber.whisper_npu import WHISPER_SAMPLE_RATE, WhisperNpu
+
+        if self.sample_rate != WHISPER_SAMPLE_RATE:
+            import numpy as np
+
+            duration = len(samples) / self.sample_rate
+            target_n = int(duration * WHISPER_SAMPLE_RATE)
+            samples = np.interp(
+                np.linspace(0.0, duration, target_n, endpoint=False),
+                np.arange(len(samples)) / self.sample_rate,
+                samples,
+            ).astype(np.float32)
+
+        segments = WhisperNpu.transcribe_audio(model, samples, self.transcription_options)
+        return {"text": " ".join(segment.text for segment in segments)}
 
     def _transcribe_via_api(self, samples, initial_prompt):
         pcm_data = (samples * 32767).astype(np.int16).tobytes()

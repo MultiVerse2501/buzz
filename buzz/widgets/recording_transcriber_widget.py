@@ -119,10 +119,6 @@ class RecordingTranscriberWidget(QWidget):
             model_type
             for model_type in ModelType
             if model_type.is_available()
-            # The NPU engine has no realtime path yet (P2 M4): offering it here
-            # would fall through RecordingTranscriber._transcribe to the
-            # OpenAI-API branch or a misleading error.
-            and model_type != ModelType.WHISPER_NPU
         ]
         return model_types, default_language
 

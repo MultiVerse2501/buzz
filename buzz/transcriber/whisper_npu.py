@@ -43,6 +43,7 @@ N_LAYERS, N_HEADS, HEAD_DIM = 6, 8, 64
 # Timestamp tokens: <|0.00|> .. <|30.00|>, 20 ms per step (openai/whisper-base).
 TIMESTAMP_TOKEN = "<|notimestamps|>"
 WINDOW_SECONDS = 30
+WHISPER_SAMPLE_RATE = 16000
 
 # Vendor-default QNN EP options (qai_hub_models aihub_defaults), the measured
 # configuration — do not add or change options here without re-benchmarking.
@@ -96,9 +97,20 @@ def _open_qnn_session(model_path: str):
 
 
 def _pad(audio, target_len: int):
+    """Pad a short chunk to a full 30-s window, deterministically.
+
+    A tiny noise floor (~-60 dBFS) instead of exact zeros: whisper-base's
+    translate mode hallucinates on long exact-silence tails ("I'm going to the
+    beach" loops), and low-level noise dampens that. Seeded by the audio
+    length so the same input always produces the same pad (reproducible).
+    """
     import numpy as np
 
-    return np.pad(audio, (0, target_len - len(audio)))
+    pad_n = target_len - len(audio)
+    if pad_n <= 0:
+        return audio
+    noise = np.random.default_rng(len(audio)).standard_normal(pad_n).astype(np.float32)
+    return np.concatenate([audio, noise * 1e-3])
 
 
 def _maybe_pin_affinity() -> None:
@@ -118,6 +130,17 @@ def _maybe_pin_affinity() -> None:
         logger.debug("BUZZ_NPU_AFFINITY_MASK %s: set=%s", mask, bool(ok))
     except Exception:
         logger.debug("Failed to apply BUZZ_NPU_AFFINITY_MASK", exc_info=True)
+
+
+def warm_up() -> None:
+    """Process-level prep before the first NPU decode in this process.
+
+    Called by both the file-transcription worker (via transcribe()) and the
+    in-process recording path: the env vars set at module import cannot reach
+    an already-loaded OpenBLAS, so the loaded library is pinned directly.
+    """
+    _maybe_pin_affinity()
+    _pin_blas_threads()
 
 
 _LANGUAGE_TOKEN_RE = re.compile(r"^<\|([a-z]{2,3})\|>$")
@@ -263,8 +286,7 @@ class _NpuWhisperModel:
 class WhisperNpu:
     @staticmethod
     def transcribe(task: FileTranscriptionTask) -> List[Segment]:
-        _maybe_pin_affinity()
-        _pin_blas_threads()
+        warm_up()
 
         model = _NpuWhisperModel(task.model_path)
 
@@ -288,20 +310,20 @@ class WhisperNpu:
         task_kind = options.task
         language = options.language or None
 
-        total_windows = max(1, -(-len(audio) // (16000 * WINDOW_SECONDS)))
+        total_windows = max(1, -(-len(audio) // (WHISPER_SAMPLE_RATE * WINDOW_SECONDS)))
         segments: List[Segment] = []
         for window_index in range(total_windows):
             window = audio[
-                window_index * 16000 * WINDOW_SECONDS:
-                (window_index + 1) * 16000 * WINDOW_SECONDS
+                window_index * WHISPER_SAMPLE_RATE * WINDOW_SECONDS:
+                (window_index + 1) * WHISPER_SAMPLE_RATE * WINDOW_SECONDS
             ]
             if len(window) == 0:
                 continue
-            if len(window) < 16000 * WINDOW_SECONDS:
-                window = _pad(window, 16000 * WINDOW_SECONDS)
+            if len(window) < WHISPER_SAMPLE_RATE * WINDOW_SECONDS:
+                window = _pad(window, WHISPER_SAMPLE_RATE * WINDOW_SECONDS)
 
             features = model.feature_extractor(
-                window, sampling_rate=16000, return_tensors="np"
+                window, sampling_rate=WHISPER_SAMPLE_RATE, return_tensors="np"
             )["input_features"].astype("float16")
             cross_attention = model.encode(features)
 

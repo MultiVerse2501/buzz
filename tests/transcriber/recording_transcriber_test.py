@@ -550,3 +550,87 @@ class TestStartLocalWhisperServer:
             finally:
                 transcriber.is_running = False
                 transcriber.process = None
+
+
+class TestWhisperNpuRecording:
+    """The WHISPER_NPU branches of _load_model / _transcribe (in-process path)."""
+
+    @staticmethod
+    def make_transcriber(sample_rate=16000, language=None, task=Task.TRANSCRIBE):
+        return RecordingTranscriber(
+            transcription_options=TranscriptionOptions(
+                model=TranscriptionModel(
+                    model_type=ModelType.WHISPER_NPU,
+                    whisper_model_size=WhisperModelSize.BASE,
+                ),
+                language=language,
+                task=task,
+            ),
+            input_device_index=None,
+            sample_rate=sample_rate,
+            model_path="fake-asset-dir",
+            sounddevice=MockSoundDevice(),
+        )
+
+    def test_transcribe_returns_text_dict(self, monkeypatch):
+        from buzz.transcriber.transcriber import Segment
+
+        transcriber = self.make_transcriber()
+        captured = {}
+
+        def fake_transcribe_audio(model, samples, options):
+            captured["model"] = model
+            captured["samples"] = samples
+            return [Segment(start=0, end=1000, text="Hello"),
+                    Segment(start=1000, end=2000, text="world")]
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu.transcribe_audio",
+            fake_transcribe_audio)
+
+        samples = np.zeros(16000, dtype=np.float32)
+        result = transcriber._transcribe_whisper_npu(samples, model=object())
+
+        assert result == {"text": "Hello world"}
+        assert captured["samples"].shape == (16000,)
+
+    def test_transcribe_resamples_device_rate_to_16k(self, monkeypatch):
+        from buzz.transcriber.transcriber import Segment
+
+        transcriber = self.make_transcriber(sample_rate=48000)
+        captured = {}
+
+        def fake_transcribe_audio(model, samples, options):
+            captured["samples"] = samples
+            return [Segment(start=0, end=1000, text="Hi")]
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu.transcribe_audio",
+            fake_transcribe_audio)
+
+        # 1 s of a 440 Hz tone at 48 kHz
+        tone = (np.sin(2 * np.pi * 440 * np.arange(48000) / 48000)
+                .astype(np.float32) * 0.5)
+        transcriber._transcribe_whisper_npu(tone, model=object())
+
+        assert captured["samples"].shape == (16000,)
+
+    def test_load_model_branch_builds_npu_model(self, monkeypatch):
+        transcriber = self.make_transcriber()
+
+        opened = []
+
+        def fake_open_session(path):
+            opened.append(path)
+            raise RuntimeError("stop at session open")
+
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu._open_qnn_session", fake_open_session)
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.warm_up", lambda: None)
+
+        with __import__("pytest").raises(RuntimeError, match="stop at session open"):
+            transcriber._load_model()
+
+        # The model path flows into the encoder session open.
+        assert any("encoder.onnx" in p for p in opened)
