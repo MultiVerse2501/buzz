@@ -32,6 +32,7 @@ class FakeDecoderSession:
         self.calls = list(calls)
         self.decoy = decoy
         self.strict_inputs = strict_inputs
+        self.fed = []
         self.cross_names = [f"cross_k_{i}" for i in range(6)] + [
             f"cross_v_{i}" for i in range(6)
         ]
@@ -56,6 +57,7 @@ class FakeDecoderSession:
         # Name-fed contract: every declared input must be present.
         if self.strict_inputs:
             assert set(feed) >= set(self.in_names)
+        self.fed.append(int(feed["input_ids"].reshape(-1)[0]))
 
         logits = np.zeros(VOCAB, dtype=np.float32)
         if self.calls:
@@ -268,6 +270,31 @@ def patch_engine(monkeypatch, audio, open_session):
     # Keep unit tests hermetic: the file path would otherwise download the
     # real Silero VAD model; these tests exercise the windowed fallback.
     monkeypatch.setattr(whisper_npu.WhisperNpu, "_load_vad", staticmethod(lambda: None))
+
+
+class TestDecodePrefixFeeding:
+    def test_forced_prefix_is_fed_in_order(self, tokenizer, langs):
+        """Regression: the cache must be conditioned on [SOT, lang, task] fed
+        sequentially (Qualcomm's reference decode). An earlier revision fed
+        [task, lang, task] — SOT never entered the cache — which drove
+        non-terminating loops on weak-language content.
+        """
+        fr = langs["fr"]
+        transcribe = tokenizer.convert_tokens_to_ids("<|transcribe|>")
+        bonjour = text_ids(tokenizer, "Bonjour")
+        calls = [None, None] + bonjour + [ts_id(0.5)]
+        dec = FakeDecoderSession(calls, strict_inputs=False)
+        model = npu_model_with(tokenizer, dec)
+        model.lang_to_id = langs
+        model.task_ids = {
+            Task.TRANSCRIBE: transcribe,
+            Task.TRANSLATE: tokenizer.convert_tokens_to_ids("<|translate|>"),
+        }
+        prefix, suppress = WhisperNpu._build_prefix(model, "fr",
+                                                    Task.TRANSCRIBE, {})
+        model.decode(prefix, {}, suppress)
+        assert dec.fed[:3] == [SOT, fr, transcribe]
+        assert dec.fed[3:3 + len(bonjour)] == bonjour
 
 
 class TestTranscribeEndToEnd:

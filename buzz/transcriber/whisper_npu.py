@@ -244,7 +244,15 @@ class _NpuWhisperModel:
         """Run the decoder; returns (first-step logits, generated token ids).
 
         One step at a time with rotated KV caches and the right-aligned -100
-        attention mask from the validated prototype.
+        attention mask from the validated prototype. The prefix (SOT,
+        language, task) is fed in order, one token per position — matching
+        Qualcomm's reference decode (ai-hub-models hf_whisper app) — and the
+        sampled tokens continue from the position after the last prefix
+        token. An earlier revision seeded the stream with the whole prefix
+        and fed its tail first, so the cache conditioned on
+        [task, lang, task] with SOT never entered; on weak-language content
+        that drove non-terminating loops (recorded 2026-11-10 in the porting
+        plans).
         """
         import numpy as np
 
@@ -254,7 +262,7 @@ class _NpuWhisperModel:
             self.zero_v = np.zeros(
                 (N_HEADS, 1, DECODE_LEN - 1, HEAD_DIM), dtype=np.float16)
 
-        out_ids = list(prefix_ids)
+        sampled: List[int] = []
         pos = np.array([0], dtype=np.int32)
         attn = np.full((1, 1, 1, DECODE_LEN), MASK_NEG, dtype=np.float16)
         state = {}
@@ -267,7 +275,8 @@ class _NpuWhisperModel:
             attn[:, :, :, DECODE_LEN - step - 1] = 0.0
             feed = dict(state)
             feed.update(cross_attention)
-            feed["input_ids"] = np.array([[out_ids[-1]]], dtype=np.int32)
+            fed_id = prefix_ids[step] if step < len(prefix_ids) else sampled[-1]
+            feed["input_ids"] = np.array([[fed_id]], dtype=np.int32)
             feed["position_ids"] = pos
             feed["attention_mask"] = attn
             outputs = self.dec_session.run(self.dec_out_names, feed)
@@ -276,9 +285,7 @@ class _NpuWhisperModel:
             logits = by_name["logits"].reshape(-1)
             if first_logits is None:
                 first_logits = logits
-            if step < len(prefix_ids) - 1:
-                out_ids.append(prefix_ids[step + 1])  # forced token
-            else:
+            if step >= len(prefix_ids) - 1:
                 if suppress:
                     logits = logits.copy()
                     for token_id in suppress:
@@ -286,14 +293,14 @@ class _NpuWhisperModel:
                 token_id = int(logits.argmax())
                 if token_id == self.eot:
                     break
-                out_ids.append(token_id)
+                sampled.append(token_id)
 
             for layer in range(N_LAYERS):
                 state[f"k_cache_self_{layer}_in"] = by_name[f"k_cache_self_{layer}_out"]
                 state[f"v_cache_self_{layer}_in"] = by_name[f"v_cache_self_{layer}_out"]
             pos = pos + 1
 
-        return first_logits, out_ids
+        return first_logits, list(prefix_ids) + sampled
 
 
 _WAV2VEC2_ALIGNER_DIR_ENV = "BUZZ_WAV2VEC2_ALIGNER_DIR"
