@@ -13,6 +13,9 @@ supported-markers = [
     "platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
 
+[manifest]
+overrides = [{ name = "openai-whisper", marker = "platform_machine != 'ARM64'" }]
+
 [[package]]
 name = "absl-py"
 version = "2.3.1"
@@ -365,7 +368,7 @@ dependencies = [
     { name = "darkdetect" },
     { name = "dataclasses-json" },
     { name = "datasets", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
-    { name = "demucs", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "demucs" },
     { name = "faster-whisper", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "flake8" },
     { name = "hatchling" },
@@ -397,11 +400,13 @@ dependencies = [
     { name = "sounddevice" },
     { name = "soundfile", version = "0.13.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "soundfile", version = "0.14.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
+    { name = "sphn", version = "0.2.1+arm64.shim", source = { path = "tools/wheels/sphn-0.2.1+arm64.shim-py3-none-win_arm64.whl" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "srt-equalizer" },
-    { name = "stable-ts", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
+    { name = "stable-ts" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torchaudio", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torchaudio", version = "2.8.0+arm64.shim", source = { path = "tools/wheels/torchaudio-2.8.0+arm64.shim-py3-none-win_arm64.whl" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "torchaudio", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(platform_machine != 'ARM64' and sys_platform == 'linux') or (platform_machine != 'ARM64' and sys_platform == 'win32')" },
     { name = "torchcodec", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "tqdm" },
@@ -452,7 +457,7 @@ requires-dist = [
     { name = "darkdetect", specifier = ">=0.8.0,<0.9" },
     { name = "dataclasses-json", specifier = ">=0.6.4,<0.7" },
     { name = "datasets", marker = "platform_machine != 'ARM64'", specifier = ">=5.0.1" },
-    { name = "demucs", marker = "platform_machine != 'ARM64'", specifier = ">=4.1.0,<5" },
+    { name = "demucs", specifier = ">=4.1.0,<5" },
     { name = "faster-whisper", marker = "platform_machine != 'ARM64'", specifier = ">=1.2.1,<2" },
     { name = "flake8", specifier = ">=7.1.2,<8" },
     { name = "hatchling", specifier = ">=1.32.0" },
@@ -484,12 +489,14 @@ requires-dist = [
     { name = "sounddevice", specifier = ">=0.5.6,<0.6" },
     { name = "soundfile", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", specifier = ">=0.14,<0.15" },
     { name = "soundfile", marker = "platform_machine != 'ARM64'", specifier = ">=0.13.1,<0.14" },
+    { name = "sphn", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", path = "tools/wheels/sphn-0.2.1+arm64.shim-py3-none-win_arm64.whl" },
     { name = "srt-equalizer", specifier = ">=0.1.10,<0.2" },
-    { name = "stable-ts", marker = "platform_machine != 'ARM64'", specifier = ">=2.19.1,<3" },
+    { name = "stable-ts", specifier = ">=2.19.1,<3" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = "==2.8.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==2.8.0" },
     { name = "torchaudio", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==2.8.0" },
     { name = "torchaudio", marker = "platform_machine != 'ARM64' and sys_platform != 'darwin'", specifier = "==2.8.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torchaudio", marker = "platform_machine == 'ARM64' and sys_platform == 'win32'", path = "tools/wheels/torchaudio-2.8.0+arm64.shim-py3-none-win_arm64.whl" },
     { name = "torchcodec", marker = "platform_machine != 'ARM64'", specifier = ">=0.16.0" },
     { name = "tqdm", specifier = ">=4.70.0,<5" },
     { name = "transformers", specifier = ">=5.19.0,<6" },
@@ -927,10 +934,12 @@ dependencies = [
     { name = "einops" },
     { name = "huggingface-hub" },
     { name = "julius" },
-    { name = "lameenc" },
+    { name = "lameenc", version = "1.8.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'ARM64' or sys_platform != 'win32'" },
+    { name = "lameenc", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "pyyaml" },
     { name = "safetensors" },
-    { name = "sphn" },
+    { name = "sphn", version = "0.2.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'ARM64' or sys_platform != 'win32'" },
+    { name = "sphn", version = "0.2.1+arm64.shim", source = { path = "tools/wheels/sphn-0.2.1+arm64.shim-py3-none-win_arm64.whl" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "tqdm" },
@@ -1636,6 +1645,11 @@ wheels = [
 name = "lameenc"
 version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform == 'linux'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
+    "platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/7d/87eb694ec04e87f49c059f4f40c2bc3543a419d9aee258efc4941ef9b888/lameenc-1.8.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:1ef8f8ad8de7a038aa0624efc6c585ad600c7e6d34acc2583631883027bd6752", size = 193822, upload-time = "2025-01-01T22:08:41.966Z" },
     { url = "https://files.pythonhosted.org/packages/b7/99/d7442223a955295543fdeafd8a61058a323b577bfe77ef57915d8d3bb2aa/lameenc-1.8.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e4bf9c20e41a66964ff5c2f0ab3072cd39df9fc19ecc419ad8ef0c9bb1e80ac1", size = 182221, upload-time = "2025-01-01T22:08:41.967Z" },
@@ -1645,6 +1659,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ad/70/5138ee0007ca06109e6697bd2eb77f9211374f49b226c04ca08cb110fd6b/lameenc-1.8.1-cp313-cp313-win_amd64.whl", hash = "sha256:c5fa96b300d27785c3110f566961bd97487c98023ee88d0822ca7c9af0fd9b89", size = 152020, upload-time = "2025-01-01T22:07:33.158Z" },
     { url = "https://files.pythonhosted.org/packages/0b/dc/a150418d932f2e2e2eedece0f62c43aa973b08a48e257b382f970887dd59/lameenc-1.8.1-cp313-cp313t-manylinux_2_17_aarch64.manylinux2014_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3ca88a3ac5848b3ade75777288c309b2db18fa0788c140811b3852533d9dc291", size = 255301, upload-time = "2025-01-01T22:16:45.182Z" },
     { url = "https://files.pythonhosted.org/packages/c6/52/f5f2d979372f3718e2792e8c3390f9eb89bc836eb484c85110c3333c9813/lameenc-1.8.1-cp313-cp313t-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:68dbacf39fc049dae22b08614d363d3293822d7255908b1bfe50d51c1a0fd6a1", size = 250524, upload-time = "2025-01-01T22:05:54.613Z" },
+]
+
+[[package]]
+name = "lameenc"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/fe/b13431a8c70fee9ea5d242d9bfcf470e3af53de702eabda1798acdc7e995/lameenc-1.9.0-cp313-cp313-win_amd64.whl", hash = "sha256:1cfc5fd2843ad464e24fbb96990c3ac1bd02dd989957e75038c47ae4ff438650", size = 119545, upload-time = "2026-10-15T20:10:53.145Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/2d/628674f0e25b700a46cdfebc38c7210d7180eb71d67c558b5ac29fea7a99/lameenc-1.9.0-cp313-cp313-win_arm64.whl", hash = "sha256:14db603d50b50280cb7995f0c2cf77a516333b35670b37d3ad08e29a1025de04", size = 105725, upload-time = "2026-10-15T20:10:52.738Z" },
 ]
 
 [[package]]
@@ -3795,11 +3821,37 @@ wheels = [
 name = "sphn"
 version = "0.2.1"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "sys_platform == 'linux'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
+    "platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 sdist = { url = "https://files.pythonhosted.org/packages/b7/94/0957f866030d6071bcfd285977ff3652bacf85e663a634d3172cf47055a7/sphn-0.2.1.tar.gz", hash = "sha256:3b19b1fece67d979d84080458bed545d1f55ddc5abac6ca5deae2672a184c7fe", size = 33477, upload-time = "2026-01-07T12:00:32.277Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8f/b8/3cdc0aa7a4b1db1abce506416b69563790d8dd178add9854de9b171cffd4/sphn-0.2.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6fc651ba2875f609b0d8d0c4af37e60c94baa21a3b52145ef018fd3cd1384f9f", size = 1753192, upload-time = "2026-01-07T12:00:29.642Z" },
     { url = "https://files.pythonhosted.org/packages/2b/d4/7953118678e8a8fe939d1bf18daa52a16baf9dadfe97bc62aa208fb3f57b/sphn-0.2.1-cp313-cp313-manylinux_2_24_x86_64.whl", hash = "sha256:8903d581e0bf93efd777e042e414a364c7ea804f9864692d3af6599c315ff192", size = 18091151, upload-time = "2026-01-07T12:00:16.68Z" },
     { url = "https://files.pythonhosted.org/packages/c4/0b/3a52a43797fed7b16fc6fe39dc212545eb8a0872daf176ebdeedf56d07f3/sphn-0.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:ce0caa7858a5e41cd66fcfae7a034877512f12fbb838d3b54662020b97895569", size = 1608163, upload-time = "2026-01-07T12:00:37.776Z" },
+]
+
+[[package]]
+name = "sphn"
+version = "0.2.1+arm64.shim"
+source = { path = "tools/wheels/sphn-0.2.1+arm64.shim-py3-none-win_arm64.whl" }
+resolution-markers = [
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "numpy" },
+    { name = "soundfile", version = "0.14.0", source = { registry = "https://pypi.org/simple" } },
+]
+wheels = [
+    { filename = "sphn-0.2.1+arm64.shim-py3-none-win_arm64.whl", hash = "sha256:224bb6e7fb3002da16fb9322e37d5b2fcc805e4be941ae8d238ec7b4ff3d0e15" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy" },
+    { name = "soundfile", specifier = ">=0.12" },
 ]
 
 [[package]]
@@ -3846,11 +3898,12 @@ version = "2.19.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
-    { name = "openai-whisper" },
+    { name = "openai-whisper", marker = "platform_machine != 'ARM64' or (sys_platform != 'linux' and sys_platform != 'win32')" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torchaudio", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-    { name = "torchaudio", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "torchaudio", version = "2.8.0+arm64.shim", source = { path = "tools/wheels/torchaudio-2.8.0+arm64.shim-py3-none-win_arm64.whl" }, marker = "platform_machine == 'ARM64' and sys_platform == 'win32'" },
+    { name = "torchaudio", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(platform_machine != 'ARM64' and sys_platform == 'win32') or sys_platform == 'linux'" },
     { name = "tqdm" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/94/d9/d326f9dbbb7da6806aa8cfc080342e5f78dc33552f4339bdc8a6251d11a3/stable_ts-2.19.1.tar.gz", hash = "sha256:0ecaf1ed93e029839569618d2da9a57b883ad04db21f0680146e0650caaf4f52", size = 189132, upload-time = "2025-08-16T16:53:48.811Z" }
@@ -4120,6 +4173,33 @@ dependencies = [
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3b/ea/2a68259c4dbb5fe44ebfdcfa40b115010d8c677221a7ef0f5577f3c4f5f1/torchaudio-2.8.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:f851d32e94ca05e470f0c60e25726ec1e0eb71cb2ca5a0206b7fd03272ccc3c8", size = 1857045, upload-time = "2025-08-06T14:58:51.984Z" },
     { url = "https://files.pythonhosted.org/packages/34/1a/69b9f8349d9d57953d5e7e445075cbf74000173fb5f5d5d9e9d59415fc63/torchaudio-2.8.0-cp313-cp313t-macosx_11_0_arm64.whl", hash = "sha256:68df9c9068984edff8065c2b6656725e6114fe89281b0cf122c7505305fc98a4", size = 1935600, upload-time = "2025-08-06T14:58:46.051Z" },
+]
+
+[[package]]
+name = "torchaudio"
+version = "2.8.0+arm64.shim"
+source = { path = "tools/wheels/torchaudio-2.8.0+arm64.shim-py3-none-win_arm64.whl" }
+resolution-markers = [
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+]
+dependencies = [
+    { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "julius" },
+    { name = "numpy" },
+    { name = "soundfile", version = "0.14.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "torch", version = "2.8.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" } },
+]
+wheels = [
+    { filename = "torchaudio-2.8.0+arm64.shim-py3-none-win_arm64.whl", hash = "sha256:0abf2bfff8ad6de3e8bf054e1b495eefd6186ef23ae0f8c001eeeb8b27680c36" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "av", specifier = ">=9" },
+    { name = "julius", specifier = ">=0.2.3" },
+    { name = "numpy" },
+    { name = "soundfile", specifier = ">=0.12" },
+    { name = "torch" },
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sphn"
+version = "0.2.1+arm64.shim"
+description = "Pure-Python stand-in for the sphn audio extension (Windows ARM64), backed by soundfile"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "soundfile>=0.12",
+]
+
+[tool.setuptools]
+packages = ["sphn"]

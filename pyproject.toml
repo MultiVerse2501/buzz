@@ -21,7 +21,11 @@ dependencies = [
     "numpy>=2.5.2,<3",
     "requests>=2.34.2,<3",
     "yt-dlp>=2026.8.19",
-    "stable-ts>=2.19.1,<3; platform_machine != 'ARM64'",  # requires torchaudio (no win_arm64 wheels)
+    "stable-ts>=2.19.1,<3",  # ARM64: torchaudio resolves against the tools/wheels shim (tools/shims/)
+    # ARM64 stand-in wheels (uv only selects local versions when explicitly
+    # pinned; drop these pins if upstream ever publishes real win_arm64 wheels)
+    "torchaudio==2.8.0+arm64.shim; sys_platform == 'win32' and platform_machine == 'ARM64'",
+    "sphn==0.2.1+arm64.shim; sys_platform == 'win32' and platform_machine == 'ARM64'",
     "faster-whisper>=1.2.1,<2; platform_machine != 'ARM64'",  # requires ctranslate2
     "openai-whisper==20250625; platform_machine != 'ARM64'",  # requires tiktoken
     "av>=19,<20; sys_platform == 'win32' and platform_machine == 'ARM64'",  # imported directly (whisper_file_transcriber); normally via faster-whisper (gated above); has cp312-abi3 win_arm64 wheels
@@ -44,7 +48,7 @@ dependencies = [
     "nvidia-cudnn-cu12>=9,<10; sys_platform != 'darwin' and platform_machine != 'ARM64'",
     # CUDA runtime libraries are provided by torch dependencies, no need to specify explicitly
     "darkdetect>=0.8.0,<0.9",
-    "demucs>=4.1.0,<5; platform_machine != 'ARM64'",  # requires sphn (no win_arm64 wheels)
+    "demucs>=4.1.0,<5",  # ARM64: sphn resolves against the tools/wheels shim (tools/shims/)
     "flake8>=7.1.2,<8",
     "mypy>=1.15.0,<2",
     "psutil>=7.2.2,<8",
@@ -118,6 +122,19 @@ environments = [
     "sys_platform == 'win32'",
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+# Windows ARM64-only stand-in wheels for torchaudio/sphn (the real packages
+# publish no win_arm64 wheels; sources in tools/shims/). The py3-none-win_arm64
+# wheel tags confine them to that platform, so every other platform resolves
+# the real packages exactly as before.
+find-links = ["tools/wheels"]
+# stable-ts declares openai-whisper unconditionally, but its compatibility
+# layer guards the whisper import (IS_WHISPER_AVAILABLE) — the transcript
+# resizer's transcribe_any path does not need it. On ARM64 openai-whisper
+# stays gated (tiktoken has no win_arm64 wheels), so relax stable-ts's
+# transitive requirement to the same marker as the direct dependency above.
+override-dependencies = [
+    "openai-whisper; platform_machine != 'ARM64'",
+]
 default-groups = [
     "dev",
     "build",
@@ -128,7 +145,13 @@ torch = [
   { index = "pytorch-cpu", marker = "sys_platform != 'darwin'" },
 ]
 torchaudio = [
-  { index = "pytorch-cpu", marker = "sys_platform != 'darwin'" },
+  { path = "tools/wheels/torchaudio-2.8.0+arm64.shim-py3-none-win_arm64.whl", marker = "sys_platform == 'win32' and platform_machine == 'ARM64'" },
+  # uv requires source markers to be disjoint; this is the pytorch-cpu arm of
+  # the previous sys_platform != 'darwin' marker, minus Windows ARM64.
+  { index = "pytorch-cpu", marker = "(platform_machine != 'ARM64' and sys_platform == 'win32') or (sys_platform != 'darwin' and sys_platform != 'win32')" },
+]
+sphn = [
+  { path = "tools/wheels/sphn-0.2.1+arm64.shim-py3-none-win_arm64.whl", marker = "sys_platform == 'win32' and platform_machine == 'ARM64'" },
 ]
 [[tool.uv.index]]
 name = "pytorch-cpu"

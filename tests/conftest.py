@@ -94,6 +94,10 @@ def pytest_sessionfinish(session, exitstatus):
     app = QApplication.instance()
     if app is None:
         return
+    # a bare QCoreApplication (created by library imports in non-GUI test
+    # subsets) has no widgets
+    if not hasattr(app, "topLevelWidgets"):
+        return
 
     for widget in app.topLevelWidgets():
         widget.close()

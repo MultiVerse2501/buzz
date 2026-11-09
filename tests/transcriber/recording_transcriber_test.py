@@ -629,9 +629,13 @@ class TestWhisperNpuRecording:
         monkeypatch.setattr(
             "buzz.transcriber.whisper_npu.warm_up", lambda: None)
 
-        with __import__("pytest").raises(RuntimeError, match="stop at session open"):
-            transcriber._load_model()
+        # since the recording error-UX change the load failure is reported
+        # through the error signal (switch-to-Whisper.cpp guidance), not raised
+        errors = []
+        transcriber.error.connect(errors.append)
+        transcriber._load_model()
 
+        assert errors, "expected the friendly NPU load-failure error"
         # The model path flows into the encoder session open.
         assert any("encoder.onnx" in p for p in opened)
 

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchaudio"
+version = "2.8.0+arm64.shim"
+description = "Pure-Python stand-in for torchaudio (Windows ARM64), backed by soundfile/PyAV/julius"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "torch",
+    "soundfile>=0.12",
+    "julius>=0.2.3",
+    "av>=9",
+]
+
+[tool.setuptools]
+packages = ["torchaudio"]
