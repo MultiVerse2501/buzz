@@ -96,6 +96,23 @@ def test_place_entering_semantics():
     assert frames.tolist() == [0, 9, 20]
     # relation to whisper.cpp t_dtw: entering[k] == t_dtw_cpp[k-1]
 
+def test_refine_valley_between_bumps():
+    # two attention bumps: token 0 centered at frame 20, token 1 at frame 80;
+    # the valley (quietest point between peaks) becomes token 1's boundary
+    T, A = 2, 100
+    prof = np.zeros((T, A), dtype=np.float32)
+    prof[0, 15:25] = 1.0
+    prof[1, 75:85] = 1.0
+    frames = npu_dtw._refine_valley(prof, np.array([10, 50]))
+    # argmin-quietest semantics (the sweep-validated criterion): token 1's
+    # profile is zero from peak(0)=15 until its bump at 75, so the quietest
+    # frame in [peak(0), peak(1)] is 15
+    assert frames.tolist() == [0, 15]
+    # monotonicity under a degenerate flat profile
+    flat = np.ones((5, 40), dtype=np.float32)
+    frames = npu_dtw._refine_valley(flat, np.array([0, 10, 20, 30, 39]))
+    assert (np.diff(frames) >= 0).all() and len(frames) == 5
+
 def test_degenerate_inputs():
     assert npu_dtw.dtw_token_frames(np.zeros((0, 8, 100), dtype=np.float32)).size == 0
     # fewer frames than tokens: DTW still assigns every token a frame

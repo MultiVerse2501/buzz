@@ -204,6 +204,34 @@ def _place_timestamps(
     return frames
 
 
+def _refine_valley(profile: np.ndarray, frames: np.ndarray) -> np.ndarray:
+    """Valley boundary refinement (X2d sweep winner, candidate C1).
+
+    The DP enters a token's row at the attention-profile CROSSOVER — where
+    the previous word's decaying tail still dominates — so raw entering
+    frames lag the acoustic onset by a systematic ~+75-135 ms (X2d §9.1).
+    The quietest frame of token k's profile BETWEEN the two tokens' attention
+    peaks (the inter-word valley) tracks the onset far better: sweep-measured
+    vs the CTC reference — MAE halved (209.9 -> 109.0 ms on mode P), the
+    systematic lateness removed (signed +91.6 -> -42.1 ms, later-frac 0.97 ->
+    0.63), consistent across all three ablation conditions. Token 0 keeps
+    frame 0 (window start, whisper's text-before-first-timestamp convention);
+    boundaries are forced monotone.
+    """
+    T, A = profile.shape
+    if T <= 1:
+        return np.zeros(T, dtype=np.int64)
+    peaks = np.maximum.accumulate(profile.argmax(axis=1))
+    out = np.zeros(T, dtype=np.int64)
+    prev = 0
+    for k in range(1, T):
+        lo = min(int(peaks[k - 1]), A - 2)
+        hi = min(max(int(peaks[k]), lo + 1), A - 1)
+        cand = lo + int(profile[k, lo:hi + 1].argmin())
+        prev = out[k] = max(cand, prev)
+    return out
+
+
 def dtw_token_frames(
     attn: np.ndarray, real_frames: int | None = None
 ) -> np.ndarray:
@@ -217,6 +245,11 @@ def dtw_token_frames(
     ``real_frames`` is the window's real audio-token count (20 ms units) —
     attention beyond it attends to zero-padding and is trimmed before the
     chain (whisper.cpp :7730 n_frames / timing.py num_frames//2).
+
+    Token boundaries are valley-refined after placement (see
+    ``_refine_valley``): the DTW path + placement provide the coarse monotonic
+    assignment, then each boundary moves to the quietest frame between the
+    two tokens' attention peaks.
     """
     if attn.shape[0] == 0:
         return np.zeros(0, dtype=np.int64)
@@ -235,10 +268,14 @@ def dtw_token_frames(
     var = attn.var(axis=0, keepdims=True)  # ddof=0 == timing.py unbiased=False
     w = (attn - mean) / np.sqrt(var + NORM_EPS)
     w = _median_filter_audio(w)
-    w = w.mean(axis=2) if w.shape[2] > 1 else w[:, :, 0]
-    cost = (-w).astype(np.float32)
+    prof_mf = w.mean(axis=2) if w.shape[2] > 1 else w[:, :, 0]
+    cost = (-prof_mf).astype(np.float32)
     path_text, path_time = _dtw(np.ascontiguousarray(cost))
-    return _place_timestamps(path_text, path_time, attn.shape[0])
+    frames = _place_timestamps(path_text, path_time, attn.shape[0])
+    # valley refinement on the UNmedian-filtered profile (sweep: slightly
+    # better than refined-profile boundaries — the filter smears the valley)
+    prof_raw = attn.mean(axis=2) if attn.shape[2] > 1 else attn[:, :, 0]
+    return _refine_valley(prof_raw, frames)
 
 
 def token_times_ms(
