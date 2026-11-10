@@ -225,22 +225,32 @@ class _NpuWhisperModel:
         return max(self.lang_ids, key=lambda tid: logits[tid])
 
     def decode(self, prefix_ids: List[int], cross_attention: dict,
-               suppress: tuple = ()) -> List[int]:
+               suppress: tuple = (), capture: Optional[List] = None) -> List[int]:
         """Greedy-generate after `prefix_ids` (force-fed, KV built) up to EOT.
 
         `suppress` holds token ids masked to -inf before every argmax (used to
         keep <|notimestamps|> out of forced-prefix runs). Returns the forced
         prefix followed by the generated ids (excluding EOT).
+
+        When `capture` is a list, one (fed_token_id, alignment_row) tuple per
+        decode step is appended to it. `alignment_row` is the decoder's
+        alignment_attn output ([8, 1500] fp16, softmax cross-attention of the
+        8 base alignment heads — path C asset) or None when the session's
+        decoder does not export it (stock asset). Row order = step order;
+        the row conditions on the KV context as fed, including the forced
+        prefix and any previously sampled tokens.
         """
         return self._decode_step(
             prefix_ids=prefix_ids,
             cross_attention=cross_attention,
             max_steps=DECODE_LEN - 1,
             suppress=suppress,
+            capture=capture,
         )[1]
 
     def _decode_step(self, prefix_ids: List[int], cross_attention: dict,
-                     max_steps: int, suppress: tuple = ()):
+                     max_steps: int, suppress: tuple = (),
+                     capture: Optional[List] = None):
         """Run the decoder; returns (first-step logits, generated token ids).
 
         One step at a time with rotated KV caches and the right-aligned -100
@@ -281,6 +291,9 @@ class _NpuWhisperModel:
             feed["attention_mask"] = attn
             outputs = self.dec_session.run(self.dec_out_names, feed)
             by_name = dict(zip(self.dec_out_names, outputs))
+
+            if capture is not None:
+                capture.append((fed_id, by_name.get("alignment_attn")))
 
             logits = by_name["logits"].reshape(-1)
             if first_logits is None:
@@ -549,8 +562,14 @@ class WhisperNpu:
         from buzz import whisper_audio
 
         audio = whisper_audio.load_audio(task.file_path)
+        # Path C X2a: capture alignment rows per window when word-level
+        # timestamps are requested. The word-timestamp dispatch consumes the
+        # records (DTW primary on patched assets, CTC fallback for stock —
+        # X2c); until then the records are accumulated and unused.
+        capture_windows = [] if task.transcription_options.word_level_timings else None
         segments = WhisperNpu.transcribe_audio(
-            model, audio, task.transcription_options, utterance_split=True
+            model, audio, task.transcription_options, utterance_split=True,
+            capture_windows=capture_windows,
         )
         if task.transcription_options.word_level_timings:
             return WhisperNpu._word_level_segments(audio, segments, task.transcription_options)
@@ -558,7 +577,8 @@ class WhisperNpu:
 
     @classmethod
     def transcribe_audio(cls, model: _NpuWhisperModel, audio, options,
-                         utterance_split: bool = False) -> List[Segment]:
+                         utterance_split: bool = False,
+                         capture_windows: Optional[List[dict]] = None) -> List[Segment]:
         """Decode 16 kHz float32 mono audio with a loaded model.
 
         utterance_split=True decodes VAD-detected speech spans as independent
@@ -567,6 +587,11 @@ class WhisperNpu:
         30-s windows serve the recording path and any caller that already
         holds stream chunks. VAD unavailability silently falls back to the
         plain windows.
+
+        When `capture_windows` is a list (word-level timestamps requested),
+        one alignment-capture record per successfully decoded window is
+        appended to it (path C X2a; consumed by the word-timestamp dispatch —
+        stock assets record None rows and fall back to the CTC aligner).
         """
         task_kind = options.task
         language = options.language or None
@@ -584,11 +609,16 @@ class WhisperNpu:
             for start_s, end_s in spans:
                 start_sample = int(start_s * WHISPER_SAMPLE_RATE)
                 window = audio[start_sample: int(end_s * WHISPER_SAMPLE_RATE)]
-                segments.extend(cls._decode_window(
+                capture: Optional[dict] = {} if capture_windows is not None else None
+                window_segments = cls._decode_window(
                     model, window, language, task_kind,
                     offset_ms=int(start_s * 1000),
                     label=f"utterance at {start_s:.1f}s",
-                ))
+                    capture=capture,
+                )
+                if capture_windows is not None and capture.get("rows"):
+                    capture_windows.append(capture)
+                segments.extend(window_segments)
                 _report_progress(int(100 * min(1.0, end_s / total_s)))
             return segments
 
@@ -600,11 +630,16 @@ class WhisperNpu:
             ]
             if len(window) == 0:
                 continue
-            segments.extend(cls._decode_window(
+            capture = {} if capture_windows is not None else None
+            window_segments = cls._decode_window(
                 model, window, language, task_kind,
                 offset_ms=window_index * WINDOW_SECONDS * 1000,
                 label=f"window {window_index}",
-            ))
+                capture=capture,
+            )
+            if capture_windows is not None and capture.get("rows"):
+                capture_windows.append(capture)
+            segments.extend(window_segments)
             # The worker's stderr is regex-parsed by the parent for progress.
             _report_progress(int(100 * (window_index + 1) / total_windows))
 
@@ -641,14 +676,23 @@ class WhisperNpu:
 
     @classmethod
     def _decode_window(cls, model: _NpuWhisperModel, window, language: Optional[str],
-                       task_kind, offset_ms: int, label: str) -> List[Segment]:
+                       task_kind, offset_ms: int, label: str,
+                       capture: Optional[dict] = None) -> List[Segment]:
         """Decode one padded 30-s window; Segments carry `offset_ms`.
 
         Padded with a noise floor only for translate (the hallucination-prone
         mode); transcribe decodes measure better with zero padding.
+
+        When `capture` is a dict, it is filled with the path C alignment
+        capture for this window: offset_ms, real_seconds (pre-pad length —
+        the DTW port trims attention to real frames), and rows (one
+        (fed_token_id, alignment_row) tuple per decode step; rows are None on
+        stock assets). Windows dropped by the hallucination guard produce no
+        record — no rows, no words.
         """
         if len(window) == 0:
             return []
+        real_seconds = len(window) / WHISPER_SAMPLE_RATE
         if len(window) < WHISPER_SAMPLE_RATE * WINDOW_SECONDS:
             window = _pad(window, WHISPER_SAMPLE_RATE * WINDOW_SECONDS,
                           noise_floor=task_kind == Task.TRANSLATE)
@@ -661,7 +705,9 @@ class WhisperNpu:
         prefix, suppress = WhisperNpu._build_prefix(
             model, language, task_kind, cross_attention
         )
-        token_ids = model.decode(prefix, cross_attention, suppress)
+        capture_rows: Optional[List] = [] if capture is not None else None
+        token_ids = model.decode(prefix, cross_attention, suppress,
+                                 capture=capture_rows)
 
         # Hallucination-loop guard: a full-length decode never sampled EOT
         # (EOT always breaks before appending), and repetitive text on top
@@ -674,6 +720,11 @@ class WhisperNpu:
                 "NPU decode hit the token cap with repetitive text (%s); dropping it",
                 label)
             return []
+
+        if capture is not None:
+            capture["offset_ms"] = offset_ms
+            capture["real_seconds"] = real_seconds
+            capture["rows"] = capture_rows
 
         return WhisperNpu._segments_from_token_stream(
             model=model,
