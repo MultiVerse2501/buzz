@@ -177,26 +177,30 @@ def _dtw(cost: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 def _place_timestamps(
     path_text: np.ndarray, path_time: np.ndarray, n_tokens: int
 ) -> np.ndarray:
-    """whisper.cpp placement (:8945-8968) over text-only rows.
+    """Per-token frame index with ENTERING semantics (openai/whisper): token
+    k's timestamp is the first path column whose text index == k — i.e. when
+    the alignment path arrives at the token (≈ word start when spoken).
 
-    Walking the forward path, every time the path advances INTO a new token
-    row (``v != last_v``), that frame index is assigned to the next token.
-    whisper.cpp leaves the final token unset (its CLI never consumes it); we
-    fill unplaced tokens with the path's last time index because our word
-    grouping consumes every token time.
+    Deliberately differs from whisper.cpp's ``t_dtw`` (:8945-8968), which
+    assigns the LEAVING time (first column of the NEXT row ≈ token end):
+    whisper.cpp's CLI only exposes per-token ``t_dtw`` and never groups it
+    into words, while our word starts are user-facing begins and the CTC /
+    human notion of a word start is the entering time. Relation:
+    ``entering[k] == t_dtw_cpp[k-1]`` (and ``entering[0] == 0``).
+    Unvisited rows (degenerate paths) inherit the previous token's frame to
+    keep times monotone.
     """
     frames = np.full(n_tokens, -1, dtype=np.int64)
-    last_v = 0
-    tok = 0
     for col in range(path_text.shape[0]):
         v = int(path_text[col])
-        if v != last_v:
-            if tok < n_tokens:
-                frames[tok] = int(path_time[col])
-            tok += 1
-            last_v = v
-    if tok < n_tokens:
-        frames[tok:] = int(path_time[-1]) if path_time.size else 0
+        if 0 <= v < n_tokens and frames[v] < 0:
+            frames[v] = int(path_time[col])
+    last = 0
+    for k in range(n_tokens):
+        if frames[k] < 0:
+            frames[k] = last
+        else:
+            last = frames[k]
     return frames
 
 

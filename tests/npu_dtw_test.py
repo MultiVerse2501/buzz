@@ -57,9 +57,10 @@ def test_trim_to_real_frames():
     attn[:, :, 1490:1500] = 10.0  # garbage in the padded region
     frames = npu_dtw.dtw_token_frames(attn, real_frames=500)
     assert frames.max() <= 499
-    # without trim the attractor would pull the last tokens there
+    # without trim the path must still traverse the padding before its end
+    # row, distorting late tokens' entering frames far past the real audio
     frames_untrimmed = npu_dtw.dtw_token_frames(attn, real_frames=None)
-    assert frames_untrimmed.max() >= 1489
+    assert frames_untrimmed.max() > frames.max()
 
 
 def test_head_collapse_equivalent():
@@ -86,6 +87,14 @@ def test_token_times_ms_offset():
     assert times[0] >= 1500
     assert times.dtype == np.int64
 
+
+def test_place_entering_semantics():
+    # path [v=(0,0,1,1,2), t=(0,5,9,12,20)]: entering frames [0, 9, 20]
+    pt = np.array([0, 0, 1, 1, 2])
+    ps = np.array([0, 5, 9, 12, 20])
+    frames = npu_dtw._place_timestamps(pt, ps, 3)
+    assert frames.tolist() == [0, 9, 20]
+    # relation to whisper.cpp t_dtw: entering[k] == t_dtw_cpp[k-1]
 
 def test_degenerate_inputs():
     assert npu_dtw.dtw_token_frames(np.zeros((0, 8, 100), dtype=np.float32)).size == 0
