@@ -459,6 +459,64 @@ class TestWordLevelSegments:
         assert [(s.start, s.end, s.text) for s in out] == [
             (0, 500, "Hello"), (600, 1900, "world"), (2100, 3800, "Goodbye")]
 
+    @staticmethod
+    def make_capture_record(tokenizer, text, n_tokens=None):
+        """Synthetic X2a capture record: prefix + text tokens, each row's
+        attention bumped at its own frame band so the DTW places tokens
+        sequentially."""
+        import numpy as np
+
+        fed = [SOT] + text_ids(tokenizer, text)[:n_tokens]
+        rows = []
+        for k, tid in enumerate(fed):
+            row = np.zeros((8, 1500), dtype=np.float16)
+            if tid < EOT:  # text token: bump at its own band
+                f0 = 40 + k * 60
+                row[:, f0:f0 + 50] = 1.0
+            rows.append((tid, row))
+        return {"offset_ms": 0, "real_seconds": 30.0, "rows": rows}
+
+    def test_dtw_dispatch_returns_word_segments(self, tokenizer):
+        # patched-asset path: DTW word Segments from capture, no aligner
+        words_text = " Hello world"
+        record = self.make_capture_record(tokenizer, words_text)
+        out = WhisperNpu._word_level_segments(
+            np.zeros(16000, dtype=np.float32), self.make_segments(),
+            SimpleNamespace(language=None), capture_windows=[record],
+            model=make_model_stub(tokenizer))
+        texts = [seg.text for seg in out]
+        assert texts == ["Hello", "world"]
+        assert all(seg.start >= 0 and seg.end > seg.start for seg in out)
+        # monotonic, within the window
+        assert out[0].start < out[1].start and out[1].end <= 30000
+
+    def test_dtw_stock_rows_fall_back_to_ctc(self, tokenizer, monkeypatch):
+        # rows carry None alignments (stock asset) -> CTC path serves
+        record = self.make_capture_record(tokenizer, " Hello world")
+        record["rows"] = [(tid, None) for tid, _ in record["rows"]]
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu._align_words",
+            lambda audio, segments, language: [
+                {"text": "Hello", "start": 0.0, "end": 0.5}])
+        out = WhisperNpu._word_level_segments(
+            np.zeros(16000, dtype=np.float32), self.make_segments(),
+            SimpleNamespace(language=None), capture_windows=[record],
+            model=make_model_stub(tokenizer))
+        assert [(s.start, s.end, s.text) for s in out] == [(0, 500, "Hello")]
+
+    def test_dtw_no_text_tokens_falls_back_to_ctc(self, tokenizer, monkeypatch):
+        # prefix-only capture (no text tokens) -> empty DTW result -> CTC
+        record = self.make_capture_record(tokenizer, "", n_tokens=0)
+        monkeypatch.setattr(
+            "buzz.transcriber.whisper_npu.WhisperNpu._align_words",
+            lambda audio, segments, language: [
+                {"text": "CTC", "start": 0.0, "end": 1.0}])
+        out = WhisperNpu._word_level_segments(
+            np.zeros(16000, dtype=np.float32), self.make_segments(),
+            SimpleNamespace(language=None), capture_windows=[record],
+            model=make_model_stub(tokenizer))
+        assert [(s.start, s.end, s.text) for s in out] == [(0, 1000, "CTC")]
+
     def test_aligner_failure_falls_back_to_segments(self, monkeypatch):
         def boom(audio, segments, language):
             raise RuntimeError("model download failed")

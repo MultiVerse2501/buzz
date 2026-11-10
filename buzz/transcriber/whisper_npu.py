@@ -18,6 +18,7 @@ The engine runs inside the WhisperFileTranscriber worker subprocess; progress
 is written to stderr as "NN%" lines and cancellation is the process kill.
 """
 import ctypes
+import functools
 import logging
 import os
 import re
@@ -563,16 +564,18 @@ class WhisperNpu:
 
         audio = whisper_audio.load_audio(task.file_path)
         # Path C X2a: capture alignment rows per window when word-level
-        # timestamps are requested. The word-timestamp dispatch consumes the
-        # records (DTW primary on patched assets, CTC fallback for stock —
-        # X2c); until then the records are accumulated and unused.
+        # timestamps are requested; the dispatch in _word_level_segments
+        # runs the DTW chain on them (patched asset) or falls back to the
+        # CTC aligner (stock asset — rows carry None alignments).
         capture_windows = [] if task.transcription_options.word_level_timings else None
         segments = WhisperNpu.transcribe_audio(
             model, audio, task.transcription_options, utterance_split=True,
             capture_windows=capture_windows,
         )
         if task.transcription_options.word_level_timings:
-            return WhisperNpu._word_level_segments(audio, segments, task.transcription_options)
+            return WhisperNpu._word_level_segments(
+                audio, segments, task.transcription_options,
+                capture_windows=capture_windows, model=model)
         return segments
 
     @classmethod
@@ -757,16 +760,95 @@ class WhisperNpu:
         return [model.sot, lang_id, task_id], (model.no_timestamps,)
 
     @staticmethod
-    def _word_level_segments(audio, segments: List[Segment], options) -> List[Segment]:
-        """Word-level Segments via the vendored CTC forced aligner (plan §1).
+    @functools.lru_cache(maxsize=1)
+    def _char_to_byte_map() -> dict:
+        """GPT-2 byte-level BPE reverse table (the multilingual whisper BPE
+        encodes bytes through bytes_to_unicode; transformers 5.19's
+        WhisperTokenizer no longer exposes byte_decoder)."""
+        bs = (list(range(ord("!"), ord("~") + 1))
+              + list(range(ord("¡"), ord("¬") + 1))
+              + list(range(ord("®"), ord("ÿ") + 1)))
+        cs = bs[:]
+        n = 0
+        for b in range(256):
+            if b not in bs:
+                bs.append(b)
+                cs.append(256 + n)
+                n += 1
+        return {chr(c): b for b, c in zip(bs, cs)}
 
-        The NPU engine's timed Segments seed the chunked aligner
-        (TranscriptAligner, reused from speaker identification) so each word
-        lands on the real audio instead of an interpolation. Any aligner
-        failure (import, model download, transcript mismatch) degrades to the
-        segment-level output with a warning — word timings are an enhancement,
-        never a failure of the transcription.
+    @staticmethod
+    def _piece_bytes(tokenizer, token_id: int) -> bytes:
+        """Token piece as raw UTF-8 bytes (reverses the BPE unicode mapping,
+        mirroring whisper_cpp.py's latin-1 round-trip)."""
+        piece = tokenizer.convert_ids_to_tokens(token_id)
+        mapping = WhisperNpu._char_to_byte_map()
+        try:
+            return bytes(mapping[c] for c in piece)
+        except KeyError:
+            return piece.encode("utf-8", errors="replace")
+
+    @staticmethod
+    def _dtw_word_segments(model, capture_windows: List[dict]) -> List[Segment]:
+        """Word Segments from one window-capture record list (path C X2c).
+
+        Consumes the X2a capture records: select text-token rows, run the DTW
+        chain (`npu_dtw`), map pieces to bytes, group into words. Raises when
+        the decoder does not export alignment_attn (stock asset) — the
+        dispatcher treats that as the CTC fallback signal.
         """
+        import numpy as np
+
+        from buzz.transcriber import npu_dtw
+
+        words: List[Segment] = []
+        for record in capture_windows:
+            rows = record.get("rows") or []
+            fed = [tid for tid, _ in rows]
+            sel = npu_dtw.select_text_token_indices(
+                fed, model.eot, model.ts_first, model.ts_last)
+            if not sel:
+                continue
+            if any(rows[i][1] is None for i in sel):
+                raise RuntimeError(
+                    "decoder does not export alignment_attn (stock asset)")
+            attn = np.stack([rows[i][1] for i in sel])
+            times = npu_dtw.token_times_ms(
+                attn, record["real_seconds"], record["offset_ms"]).tolist()
+            texts = [WhisperNpu._piece_bytes(model.tokenizer, fed[i])
+                     for i in sel]
+            end_ms = record["offset_ms"] + int(record["real_seconds"] * 1000)
+            for start, end, text in npu_dtw.group_word_segments(
+                    texts, times, end_ms):
+                words.append(Segment(start=start, end=end, text=text))
+        return words
+
+    @staticmethod
+    def _word_level_segments(audio, segments: List[Segment], options,
+                             capture_windows: Optional[List[dict]] = None,
+                             model=None) -> List[Segment]:
+        """Word-level Segments: DTW from the patched asset's own attention,
+        CTC forced aligner otherwise (path C X2c).
+
+        Dispatch: when the decode captured alignment rows (attention-exporting
+        decoder asset, X2a), word timings come from the whisper-internal DTW
+        chain (`npu_dtw`) — no second model, all languages. Without capture
+        (stock asset) or on any DTW failure/empty result, the previous CTC
+        aligner path runs unchanged (its own failure still degrades to the
+        segment-level output — word timings are an enhancement, never a
+        failure of the transcription).
+        """
+        if capture_windows and model is not None:
+            try:
+                words = WhisperNpu._dtw_word_segments(model, capture_windows)
+            except Exception:
+                logger.warning(
+                    "DTW word timestamps failed; falling back to the CTC aligner",
+                    exc_info=True)
+            else:
+                if words:
+                    return words
+                logger.warning("DTW word timestamps produced no words; falling back to the CTC aligner")
         if not segments:
             return segments
         try:
