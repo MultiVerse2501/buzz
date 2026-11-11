@@ -1225,8 +1225,9 @@ class TestWhisperNpuModelType:
     def test_supports_initial_prompt_false(self):
         assert ModelType.WHISPER_NPU.supports_initial_prompt is False
 
-    def test_is_manually_downloadable_false(self):
-        assert ModelType.WHISPER_NPU.is_manually_downloadable() is False
+    def test_is_manually_downloadable_true(self):
+        # manually downloadable since M5 (Preferences > Models row)
+        assert ModelType.WHISPER_NPU.is_manually_downloadable() is True
 
     def test_is_available_false_off_windows_arm64(self):
         with patch("platform.system", return_value="Linux"), \

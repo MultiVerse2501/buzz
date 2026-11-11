@@ -2,6 +2,7 @@ import platform
 
 import pytest
 
+from buzz.model_loader import ModelType
 from buzz.widgets.model_type_combo_box import ModelTypeComboBox
 
 
@@ -10,19 +11,28 @@ class TestModelTypeComboBox:
         "model_types",
         [
             pytest.param(
-                [
-                    "Whisper.cpp",
-                    "Hugging Face",
-                    "Faster Whisper",
-                    "OpenAI Whisper",
-                    "OpenAI Whisper API",
-                    # Faster Whisper is not available on macOS x86_64
-                ] if not (platform.system() == "Darwin" and platform.machine() == "x86_64") else [
-                    "Whisper.cpp",
-                    "Hugging Face",
-                    "OpenAI Whisper",
-                    "OpenAI Whisper API",
-                ],
+                (
+                    [
+                        "Whisper.cpp",
+                        "Hugging Face",
+                        "Faster Whisper",
+                        "OpenAI Whisper",
+                        "OpenAI Whisper API",
+                        # Faster Whisper is not available on macOS x86_64
+                    ] if not (platform.system() == "Darwin" and platform.machine() == "x86_64") else [
+                        "Whisper.cpp",
+                        "Hugging Face",
+                        "OpenAI Whisper",
+                        "OpenAI Whisper API",
+                    ]
+                ) + (
+                    # the NPU engine is listed only where its stack is
+                    # available (Windows ARM64) — mirrors the widget's
+                    # is_available() filter; last in ModelType order
+                    [ModelType.WHISPER_NPU.value]
+                    if ModelType.WHISPER_NPU.is_available()
+                    else []
+                )
             ),
         ],
     )
