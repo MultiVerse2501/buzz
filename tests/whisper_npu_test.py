@@ -615,6 +615,100 @@ class TestNpuCtcEmissions:
         assert fake.feeds[0].shape == (1, 160000)
 
 
+class TestNpuMmsEmissions:
+    """The cloud-built MMS-300m emissions backend (unit: no device needed)."""
+
+    def test_discover_none_without_env(self, monkeypatch):
+        monkeypatch.delenv("BUZZ_MMS_ALIGNER_DIR", raising=False)
+        assert whisper_npu._NpuMmsEmissions.discover() is None
+
+    def test_discover_none_when_asset_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("BUZZ_MMS_ALIGNER_DIR", str(tmp_path))
+        assert whisper_npu._NpuMmsEmissions.discover() is None
+
+    def test_emissions_stitching_raw_declared_dtype(self, monkeypatch, tmp_path):
+        asset = tmp_path / "asset"
+        asset.mkdir()
+        (asset / "model.onnx").write_bytes(b"x")
+
+        emissions_cls = whisper_npu._NpuMmsEmissions
+        model = emissions_cls.__new__(emissions_cls)
+        model.asset_dir = str(asset)
+        model.in_dtype = np.float16
+
+        class FakeSession:
+            def __init__(self):
+                self.feeds = []
+
+            def get_inputs(self):
+                return [SimpleNamespace(name="input_values",
+                                        type="tensor(float16)")]
+
+            def run(self, _, feed):
+                self.feeds.append(feed["input_values"])
+                return [np.full((1, 499, 31), 7.0, dtype=np.float16)]
+
+        fake = FakeSession()
+        model.session = fake
+        model.input_name = "input_values"
+
+        # Non-zero audio: feeds must carry the RAW waveform — the graph has
+        # no external normalization, same as the vendored CPU path feeding
+        # the checkpoint raw /32768-scaled audio.
+        audio = np.linspace(-0.5, 0.5, 320000, dtype=np.float32)  # 20 s
+        out = model.emissions(audio)
+
+        # 2 windows -> 998 frames; log_softmax over 31 classes + the zero
+        # star column (generate_emissions parity). Constant logits ->
+        # every vocab column = -ln(31), star column = 0.0.
+        assert out.shape == (2 * 499, 32)
+        np.testing.assert_allclose(
+            out[:, :31], -np.log(31.0), rtol=1e-5)
+        assert np.allclose(out[:, 31], 0.0)
+        assert len(fake.feeds) == 2
+        assert fake.feeds[0].dtype == np.float16
+        assert fake.feeds[0].shape == (1, 160000)
+        np.testing.assert_allclose(
+            fake.feeds[0][0, :320].astype(np.float32), audio[:320], rtol=1e-2)
+
+    def test_emissions_trim_to_real_audio(self, monkeypatch, tmp_path):
+        asset = tmp_path / "asset"
+        asset.mkdir()
+        (asset / "model.onnx").write_bytes(b"x")
+
+        model = whisper_npu._NpuMmsEmissions.__new__(whisper_npu._NpuMmsEmissions)
+        model.asset_dir = str(asset)
+        model.in_dtype = np.float16
+        model.session = type("S", (), {
+            "get_inputs": lambda self: [SimpleNamespace(
+                name="input_values", type="tensor(float16)")],
+            "run": lambda self, _, feed: [np.full((1, 499, 31), 1.0,
+                                                  dtype=np.float16)],
+        })()
+        model.input_name = "input_values"
+
+        # 11.875 s: two padded windows (998 frames) stitched, but the real
+        # audio grid is ceil(190000/320) = 594 frames — the padded tail of
+        # the last window must be trimmed off (generate_emissions parity).
+        audio = np.zeros(190000, dtype=np.float32)
+        out = model.emissions(audio)
+        assert out.shape == (594, 32)
+
+    def test_emissions_empty_tail_only(self, monkeypatch, tmp_path):
+        asset = tmp_path / "asset"
+        asset.mkdir()
+        (asset / "model.onnx").write_bytes(b"x")
+
+        model = whisper_npu._NpuMmsEmissions.__new__(whisper_npu._NpuMmsEmissions)
+        model.asset_dir = str(asset)
+        model.in_dtype = np.float16
+        model.session = None  # never reached: the loop breaks on the tail
+        model.input_name = "input_values"
+
+        out = model.emissions(np.zeros(800, dtype=np.float32))  # <0.1 s tail
+        assert out.shape[0] == 0
+
+
 class TestNpuFallback:
     """File-path fallback to whisper.cpp when the NPU engine fails."""
 

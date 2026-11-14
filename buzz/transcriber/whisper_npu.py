@@ -454,6 +454,107 @@ class _NpuCtcEmissions:
         return np.concatenate(windows, axis=0) if windows else np.zeros((0, 32), np.float32)
 
 
+_MMS_ALIGNER_DIR_ENV = "BUZZ_MMS_ALIGNER_DIR"
+_MMS_ALIGNER_MODEL_REPO = "MahmoudAshraf/mms-300m-1130-forced-aligner"
+
+
+class _NpuMmsEmissions:
+    """Aligner CTC emissions on the HTP via the cloud-compiled MMS-300m graph.
+
+    The multilingual (1130-language) MMS-300m forced aligner has no vendor
+    NPU asset — the graph is our own fp16 export compiled on AI Hub (QAIRT
+    2.50 toolchain, the shipping wheel's exact version). Static
+    [1, 160000] input, [1, 499, vocab] output; the wav2vec2 conv frontend
+    runs inside the graph, so windows are plain raw 16 kHz audio fed at the
+    session's declared dtype (fp16 for the cloud artifact) — no external
+    normalization, exactly how the vendored CPU path feeds the checkpoint.
+    Windows advance by the model's own frame grid (499 frames x 320-sample
+    stride) so the stitched frame timeline has no cumulative drift.
+    """
+
+    WINDOW_SAMPLES = 160000
+    WINDOW_STRIDE_SAMPLES = 159680  # 499 frames x 320-sample model stride
+    FRAMES_PER_WINDOW = 499
+    STRIDE_MS = 20.0
+
+    def __init__(self, asset_dir: str):
+        import numpy as np
+
+        import onnxruntime as ort
+
+        from buzz.npu_capability import get_qnn_ep_devices
+
+        self.asset_dir = asset_dir
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        session_options.add_provider_for_devices(
+            get_qnn_ep_devices(), QNN_PROVIDER_OPTIONS
+        )
+        self.session = ort.InferenceSession(
+            os.path.join(asset_dir, "model.onnx"),
+            sess_options=session_options,
+        )
+        self.input_name = self.session.get_inputs()[0].name
+        declared = self.session.get_inputs()[0].type
+        self.in_dtype = {"tensor(float16)": np.float16,
+                         "tensor(float)": np.float32}[declared]
+
+    @classmethod
+    def discover(cls) -> Optional["_NpuMmsEmissions"]:
+        """The configured MMS aligner graph, or None (caller falls back to CPU).
+
+        Point ``BUZZ_MMS_ALIGNER_DIR`` at the AI Hub whole-graph directory
+        (wrapper ``model.onnx`` + ``model.bin`` context beside it). Download
+        and bundling of this asset is not productized yet — without it the
+        aligner runs its acoustic model on CPU (MMS-300m) exactly as before.
+        """
+        asset_dir = os.getenv(_MMS_ALIGNER_DIR_ENV)
+        if not asset_dir or not os.path.isfile(
+                os.path.join(asset_dir, "model.onnx")):
+            return None
+        try:
+            return cls(asset_dir)
+        except Exception:
+            logger.warning("NPU MMS aligner asset failed to load",
+                           exc_info=True)
+            return None
+
+    def emissions(self, audio):
+        """Stitched log-probs (frames, vocab+1) for 16 kHz float32 mono audio.
+
+        Matches the CPU path's generate_emissions post-processing exactly:
+        trim the stitched grid to the real audio (the last window is
+        zero-padded), log_softmax over the model vocab, then append the zero
+        star column the aligner's wildcard token resolves to.
+        """
+        import numpy as np
+
+        windows = []
+        for start in range(0, len(audio), self.WINDOW_STRIDE_SAMPLES):
+            window = audio[start: start + self.WINDOW_SAMPLES]
+            if len(window) < 1600:  # <0.1 s tail: nothing alignable
+                break
+            padded = np.zeros(self.WINDOW_SAMPLES, dtype=self.in_dtype)
+            padded[: len(window)] = window
+            logits = self.session.run(
+                None, {self.input_name: padded.reshape(1, -1)})[0][0]
+            windows.append(logits.astype(np.float32))
+            if len(window) < self.WINDOW_SAMPLES:
+                break
+        if not windows:
+            return np.zeros((0, 0), np.float32)
+        out = np.concatenate(windows, axis=0)
+        real_frames = -(-len(audio) // 320)  # ceil(samples / model stride)
+        if out.shape[0] > real_frames:
+            out = out[:real_frames]
+        shifted = out - out.max(axis=-1, keepdims=True)
+        out = shifted - np.log(np.exp(shifted).sum(axis=-1, keepdims=True))
+        return np.concatenate(
+            [out, np.zeros((out.shape[0], 1), out.dtype)], axis=1)
+
+
 _SILERO_VAD_URL = (
     "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
 )
@@ -1012,11 +1113,13 @@ class WhisperNpu:
     def _align_words(audio, segments: List[Segment], language: str) -> List[dict]:
         """Run the vendored CTC aligner over the NPU segments; raises on failure.
 
-        The acoustic-model pass is language-gated: English uses the w8a16
-        wav2vec2 asset on the HTP when it is available (configured via
-        ``BUZZ_WAV2VEC2_ALIGNER_DIR``); everything else runs the multilingual
-        MMS-300m model on CPU, exactly as the speaker-identification flow does.
-        The Viterbi (forced_align C++) and the transcript handling stay shared.
+        The acoustic-model pass, best available first: English uses the
+        w8a16 wav2vec2 asset on the HTP when it is available (configured via
+        ``BUZZ_WAV2VEC2_ALIGNER_DIR``); any language uses the cloud-compiled
+        MMS-300m whole-graph on the HTP when it is available (configured via
+        ``BUZZ_MMS_ALIGNER_DIR``); otherwise the multilingual MMS-300m model
+        runs on CPU, exactly as the speaker-identification flow does. The
+        Viterbi (forced_align C++) and the transcript handling stay shared.
         """
         import torch
         from ctc_forced_aligner.ctc_forced_aligner import (
@@ -1031,8 +1134,10 @@ class WhisperNpu:
 
         from buzz.transcriber.speaker_identifier import TranscriptAligner
 
+        npu_mms = _NpuMmsEmissions.discover()
         npu_ctc = _NpuCtcEmissions.discover() if language == "en" else None
         if npu_ctc is not None:
+            logger.info("Aligner acoustic pass: wav2vec2-960h w8a16 on HTP")
             from transformers import AutoTokenizer
 
             emissions = torch.from_numpy(npu_ctc.emissions(audio))
@@ -1044,6 +1149,19 @@ class WhisperNpu:
                 word_delimiter_token=None,
             )
             preprocess_fn = _preprocess_text_no_stars
+        elif npu_mms is not None:
+            logger.info("Aligner acoustic pass: MMS-300m on HTP (cloud-built graph)")
+            from transformers import AutoTokenizer
+
+            emissions = torch.from_numpy(npu_mms.emissions(audio))
+            stride = npu_mms.STRIDE_MS
+            if emissions.size(0) < 2:
+                raise RuntimeError("Audio too short to align on the NPU.")
+            tokenizer = AutoTokenizer.from_pretrained(
+                _MMS_ALIGNER_MODEL_REPO,
+                word_delimiter_token=None,
+            )
+            preprocess_fn = preprocess_text
         else:
             model, tokenizer = load_alignment_model(device="cpu", dtype=torch.float32)
             emissions, stride = generate_emissions(model, torch.from_numpy(audio))
