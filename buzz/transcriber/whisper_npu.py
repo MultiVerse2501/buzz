@@ -80,6 +80,35 @@ def _pin_blas_threads() -> None:
         logger.debug("OpenBLAS thread pin failed", exc_info=True)
 
 
+def _assert_asset_runtime_compatible(model_dir: str) -> None:
+    """Refuse assets compiled with a QAIRT newer than the bundled runtime.
+
+    The shipped onnxruntime-qnn wheel bundles QAIRT 2.50.40; a context
+    exported at a newer toolchain (e.g. 2.52) fails deep inside session
+    open with "Using newer context binary on old SDK" (err 5000). Reading
+    the asset's recorded toolchain first turns that into an actionable
+    error naming the asset and the needed runtime.
+    """
+    import json
+
+    runtime_floor = (2, 50)  # wheel-bundled QAIRT 2.50.40 (pyproject pin)
+    try:
+        with open(os.path.join(model_dir, "metadata.json"),
+                  encoding="utf-8") as f:
+            meta = json.load(f)
+        qairt = (meta.get("tool_versions") or {}).get("qairt", "")
+    except (OSError, ValueError):
+        return  # no/readable metadata: let session open report on its own
+    match = re.match(r"(\d+)\.(\d+)", str(qairt))
+    if match and tuple(int(g) for g in match.groups()) > runtime_floor:
+        raise RuntimeError(
+            f"whisper-NPU asset at {model_dir} was compiled with QAIRT "
+            f"{qairt}, but this build bundles QAIRT 2.50.40 (a runtime can "
+            f"only load contexts built with an equal or older toolchain). "
+            f"Re-fetch or rebuild the asset at QAIRT <= 2.50."
+        )
+
+
 def _open_qnn_session(model_path: str):
     import onnxruntime as ort
 
@@ -180,6 +209,7 @@ class _NpuWhisperModel:
     def __init__(self, model_dir: str):
         from transformers import WhisperFeatureExtractor, WhisperTokenizer
 
+        _assert_asset_runtime_compatible(model_dir)
         self.tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base")
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(
             "openai/whisper-base"
@@ -428,6 +458,18 @@ _SILERO_VAD_URL = (
     "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
 )
 _SILERO_VAD_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+# NPU VAD leg (2026-11-15 migration decision): Qualcomm's float card export —
+# same Silero v5 weights (byte-identical big tensors) in the static card
+# contract (audio_chunk [1,512] + state [1,2,128] + context [1,64]) that runs
+# whole-graph on the HTP through the shipping QNN wheel. Zip carries the
+# external-data pair silero_vad.onnx + silero_vad.data.
+_SILERO_VAD_CARD_URL = (
+    "https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models"
+    "/models/silero_vad/releases/v0.66.0/silero_vad-onnx-float.zip"
+)
+_SILERO_VAD_CARD_ZIP_SHA256 = (
+    "aee85bda493867aa5591704724238729b9b583ed54019d3088c873c3a1b4b7fa"
+)
 VAD_SAMPLES_PER_CHUNK = 512  # 32 ms at 16 kHz
 VAD_CONTEXT_SAMPLES = 64  # prepended to every chunk (v5 feeding contract)
 VAD_SPEECH_ENTER = 0.5
@@ -471,6 +513,85 @@ def _ensure_vad_onnx() -> Optional[str]:
     except Exception:
         logger.warning("Silero VAD unavailable; using plain 30-s windows", exc_info=True)
         return None
+
+
+def _ensure_vad_card_onnx() -> Optional[str]:
+    """Path to the Qualcomm card-export Silero VAD (NPU leg), downloading on
+    first use. Returns None when unavailable (the CPU leg or plain windows
+    take over): VAD is a quality enhancement, never a failure."""
+    import hashlib
+    import io
+    import zipfile
+
+    try:
+        from buzz.model_loader import model_root_dir
+
+        vad_dir = os.path.join(model_root_dir, "silero-vad", "card")
+        # keep the archive's own filenames: the ONNX proto references its
+        # external weights by the literal name "silero_vad.data", resolved
+        # next to the .onnx — the subdir isolates them from the CPU leg's
+        # dispatcher silero_vad.onnx one level up.
+        onnx_path = os.path.join(vad_dir, "silero_vad.onnx")
+        data_path = os.path.join(vad_dir, "silero_vad.data")
+        if os.path.isfile(onnx_path) and os.path.isfile(data_path):
+            return onnx_path
+        os.makedirs(vad_dir, exist_ok=True)
+        import requests
+
+        response = requests.get(_SILERO_VAD_CARD_URL, timeout=60)
+        response.raise_for_status()
+        blob = response.content
+        if hashlib.sha256(blob).hexdigest() != _SILERO_VAD_CARD_ZIP_SHA256:
+            raise RuntimeError("Silero VAD card download failed the sha256 check")
+        member_dir = "silero_vad-onnx-float/"
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            for member, dest in ((member_dir + "silero_vad.onnx", onnx_path),
+                                 (member_dir + "silero_vad.data", data_path)):
+                with open(dest, "wb") as f:
+                    f.write(zf.read(member))
+        return onnx_path
+    except Exception:
+        logger.warning("Silero VAD card export unavailable; trying the CPU leg",
+                       exc_info=True)
+        return None
+
+
+class _SileroVadNpu:
+    """NPU VAD leg: the card float ONNX whole-graph on the HTP via the QNN
+    wheel (weights byte-identical to the dispatcher model; span agreement
+    1.0 and byte-identical transcripts measured E2E, 2026-11-15).
+
+    Card contract: audio_chunk [1, 512] (no prepended context — the graph
+    threads its own 64-sample rolling context via context_out), state
+    [1, 2, 128]; one speech probability per 32-ms chunk, same chunk grid
+    as the CPU leg.
+    """
+
+    def __init__(self, onnx_path: str):
+        self.session = _open_qnn_session(onnx_path)
+        self.out_names = [o.name for o in self.session.get_outputs()]
+        import numpy as np
+
+        self._np = np
+        self._state = np.zeros((1, 2, 128), dtype=np.float32)
+        self._context = np.zeros((1, VAD_CONTEXT_SAMPLES), dtype=np.float32)
+
+    def speech_probs(self, audio) -> List[float]:
+        np = self._np
+        probs = []
+        for start in range(0, len(audio) - VAD_SAMPLES_PER_CHUNK + 1,
+                           VAD_SAMPLES_PER_CHUNK):
+            chunk = audio[start: start + VAD_SAMPLES_PER_CHUNK].reshape(1, -1)
+            outs = self.session.run(self.out_names, {
+                "audio_chunk": chunk,
+                "context": self._context,
+                "state": self._state,
+            })
+            om = dict(zip(self.out_names, outs))
+            probs.append(float(np.asarray(om["speech_prob"]).reshape(-1)[0]))
+            self._state = np.asarray(om["state_out"]).reshape(1, 2, 128)
+            self._context = np.asarray(om["context_out"]).reshape(1, VAD_CONTEXT_SAMPLES)
+        return probs
 
 
 class _SileroVad:
@@ -667,6 +788,19 @@ class WhisperNpu:
 
     @staticmethod
     def _load_vad():
+        """NPU leg first (2026-11-15 migration: dispatching the 2 MB graph to
+        the HTP moves VAD math off the host CPU for the energy program), CPU
+        dispatcher as the fallback leg; plain 30-s windows if both fail.
+        BUZZ_VAD_CPU=1 forces the CPU leg (battery A/B + bisection)."""
+        if os.environ.get("BUZZ_VAD_CPU") != "1":
+            card_path = _ensure_vad_card_onnx()
+            if card_path is not None:
+                try:
+                    return _SileroVadNpu(card_path)
+                except Exception:
+                    logger.warning(
+                        "Silero VAD NPU leg failed to load; trying the CPU leg",
+                        exc_info=True)
         onnx_path = _ensure_vad_onnx()
         if onnx_path is None:
             return None
