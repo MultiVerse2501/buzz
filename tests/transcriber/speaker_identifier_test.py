@@ -889,3 +889,49 @@ class TestTranscriptAlignerWithRealCtc:
         assert [word["start"] for word in result] == pytest.approx([100, 105.2], abs=0.3)
         assert "joins_previous" not in result[0]
         assert result[1]["joins_previous"] is True
+
+
+class TestGenerateEmissionsPaddingTrim:
+    """The vendored aligner's windowed-inference tail trim sliced
+    ``emissions[: -(extension // ratio)]``; when the audio is just short of a
+    30-second multiple, ``extension // ratio`` is 0 and ``[:-0]`` drops EVERY
+    frame, so word alignment failed with "Cannot align text to a single frame
+    of audio". Regression: the trim must index from the front."""
+
+    class _FakeModel:
+        """Stands in for the CTC model: stride 320, 31-vocab logits."""
+
+        class config:
+            inputs_to_logits_ratio = 320
+
+        def __call__(self, batch):
+            frames = batch.size(1) // self.config.inputs_to_logits_ratio
+            return MagicMock(logits=torch.zeros(batch.size(0), frames, 31))
+
+    def _run(self, n_samples):
+        from ctc_forced_aligner.ctc_forced_aligner.alignment_utils import (
+            SAMPLING_FREQ,
+            generate_emissions,
+        )
+
+        emissions, stride = generate_emissions(
+            self._FakeModel(), torch.zeros(n_samples)
+        )
+        assert stride == 20.0
+        return emissions
+
+    def test_just_under_window_multiple_keeps_all_frames(self):
+        # two full windows minus 87 samples -> extension 87 < stride 320;
+        # the old code trimmed 0 frames by deleting all of them
+        emissions = self._run(int(2 * 30 * 16000) - 87)
+        assert emissions.size(0) == 2 * 1500
+        assert emissions.size(1) == 32  # vocab + star column
+
+    def test_extension_over_a_frame_trims_its_frames(self):
+        # extension 640 samples = 2 frames of pure padding to drop
+        emissions = self._run(int(3 * 30 * 16000) - 640)
+        assert emissions.size(0) == 3 * 1500 - 2
+
+    def test_exact_window_multiple_has_nothing_to_trim(self):
+        emissions = self._run(int(2 * 30 * 16000))
+        assert emissions.size(0) == 2 * 1500
