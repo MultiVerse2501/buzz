@@ -341,24 +341,19 @@ class IdentificationWorker(QObject):
     def _run_diarization(self, audio_waveform, device):
         import torch
 
-        # Snapdragon machines: run the diarization stage on the Hexagon NPU
+        # Snapdragon machines: the diarization stage runs on the Hexagon NPU
         # (pyannote segmentation + titanet + MSDD decoder, NeMo-free) when the
         # assets are present. BUZZ_DIARIZER_NPU=0 forces the legacy path.
-        legacy_available = self._MSDDDiarizer is not None
-        if speaker_diarization_npu.is_available():
-            if self.diarizer == "sortformer":
-                # the NPU pipeline implements the MSDD algorithm; sortformer
-                # has no NPU artifact yet
-                raise RuntimeError(
-                    "Sortformer diarization is not available on this NPU "
-                    "build. Use the MSDD diarizer.")
-            speaker_ts = speaker_diarization_npu.diarize_speaker_turns(
-                audio_waveform, num_speakers=self.num_speakers)
+        diarizer_model = speaker_diarization_npu.create_diarizer(self.diarizer)
+        if diarizer_model is not None:
+            speaker_ts = diarizer_model.diarize(
+                torch.from_numpy(audio_waveform).unsqueeze(0),
+                num_speakers=self.num_speakers)
             if not speaker_ts:
                 raise RuntimeError(
                     "No speech segments were detected in this recording.")
             return speaker_ts
-        if not legacy_available:
+        if self._MSDDDiarizer is None:
             raise RuntimeError(
                 "Speaker identification needs either the NPU diarization "
                 f"assets (expected under {speaker_diarization_npu.assets_dir()}) "

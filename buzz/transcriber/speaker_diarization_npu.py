@@ -538,3 +538,48 @@ def diarize_speaker_turns(audio: np.ndarray,
     logging.debug("Speaker diarization NPU: %d turns across %d speakers",
                   len(speaker_ts), k)
     return speaker_ts
+
+
+class NpuDiarizer:
+    """The NPU backend shaped like upstream's diarizer wrappers
+    (whisper_diarization.diarization.MSDDDiarizer / SortformerDiarizer):
+    construct, then .diarize(audio, num_speakers) -> [(start_ms, end_ms,
+    spk_1based)]. `audio` accepts the same torch tensor (1, N) float32
+    16 kHz the widget hands the NeMo wrappers, or a numpy array."""
+
+    def __init__(self, device=None):
+        # `device` mirrors the NeMo wrappers' signature; the NPU is selected
+        # by the QNN runtime, so it is intentionally ignored.
+        self.device = device
+
+    @staticmethod
+    def available() -> bool:
+        return is_available()
+
+    @staticmethod
+    def assets() -> Path:
+        return assets_dir()
+
+    def diarize(self, audio, num_speakers: int | None = None) -> list:
+        try:
+            import torch
+            if torch.is_tensor(audio):
+                audio = audio.detach().cpu().numpy().flatten()
+        except ImportError:
+            audio = np.asarray(audio).flatten()
+        return diarize_speaker_turns(np.asarray(audio, dtype=np.float32),
+                                     num_speakers=num_speakers)
+
+
+def create_diarizer(diarizer_name: str):
+    """Backend factory for the identification worker: returns an NpuDiarizer
+    when the requested diarizer can run on the NPU (the MSDD algorithm), None
+    when the NPU is unavailable (caller falls back to the legacy NeMo path),
+    and raises a clear error for a diarizer that has no NPU artifact."""
+    if not is_available():
+        return None
+    if diarizer_name == "msdd":
+        return NpuDiarizer()
+    raise RuntimeError(
+        f"The {diarizer_name} diarizer has no NPU implementation. "
+        "Use the MSDD diarizer.")
