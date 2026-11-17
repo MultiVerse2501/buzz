@@ -358,6 +358,10 @@ class IdentificationWorker(QObject):
                 "Speaker identification needs either the NPU diarization "
                 f"assets (expected under {speaker_diarization_npu.assets_dir()}) "
                 "or the NeMo diarization stack (unavailable on this install).")
+        if self.diarizer == "sortformer" and self._SortformerDiarizer is None:
+            raise RuntimeError(
+                "Sortformer diarization requires the NeMo diarization stack "
+                "(unavailable on this install).")
 
         # Silence NeMo's verbose logging
         logging.getLogger("nemo_logging").setLevel(logging.ERROR)
