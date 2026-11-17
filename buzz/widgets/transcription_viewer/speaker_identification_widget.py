@@ -48,6 +48,7 @@ from buzz.db.service.transcription_service import TranscriptionService
 from buzz.paths import file_path_as_title
 from buzz.settings.settings import Settings
 from buzz.sounddevice_player import AudioFilePlayer
+from buzz.transcriber import speaker_diarization_npu
 from buzz.widgets.audio_file_player_loader import AudioFilePlayerLoader
 from buzz.widgets.line_edit import LineEdit
 from buzz.transcriber.speaker_identifier import (
@@ -210,7 +211,13 @@ class IdentificationWorker(QObject):
             punct_model_langs,
         )
         from deepmultilingualpunctuation.deepmultilingualpunctuation import PunctuationModel
-        from whisper_diarization.diarization import MSDDDiarizer, SortformerDiarizer
+        try:
+            # NeMo-based diarizers: only required for the legacy (non-NPU)
+            # diarization path; absent on Windows-on-ARM64 installs, where the
+            # NPU diarizer (buzz.transcriber.speaker_diarization_npu) runs.
+            from whisper_diarization.diarization import MSDDDiarizer, SortformerDiarizer
+        except ImportError:
+            MSDDDiarizer = SortformerDiarizer = None
         from buzz.transcriber.nemo_memory_patch import patch_nemo_memory_use
 
         patch_nemo_memory_use()
@@ -233,15 +240,16 @@ class IdentificationWorker(QObject):
         self._SortformerDiarizer = SortformerDiarizer
 
     def _get_transcript_data(self):
-        import faster_whisper
-
         language = self._get_language() or "en"
 
         segments = self._get_segments()
 
         full_transcript = join_segment_texts(segment.text for segment in segments)
 
-        audio_waveform = faster_whisper.decode_audio(self._get_audio_file())
+        # Same contract as faster_whisper.decode_audio (float32 mono 16 kHz),
+        # without the faster-whisper dependency (absent on Windows-on-ARM64).
+        from buzz import whisper_audio
+        audio_waveform = whisper_audio.load_audio(self._get_audio_file())
         return language, segments, full_transcript, audio_waveform
 
     def _setup_device(self):
@@ -332,6 +340,16 @@ class IdentificationWorker(QObject):
 
     def _run_diarization(self, audio_waveform, device):
         import torch
+
+        # Snapdragon machines: run the diarization stage on the Hexagon NPU
+        # (pyannote segmentation + titanet + MSDD decoder, NeMo-free) when the
+        # assets are present. BUZZ_DIARIZER_NPU=0 forces the legacy path.
+        if self.diarizer == "msdd" and speaker_diarization_npu.is_available():
+            logging.debug(
+                "Speaker identification worker: Running MSDD diarization on the NPU"
+            )
+            return speaker_diarization_npu.diarize_speaker_turns(
+                audio_waveform, num_speakers=self.num_speakers)
 
         # Silence NeMo's verbose logging
         logging.getLogger("nemo_logging").setLevel(logging.ERROR)
