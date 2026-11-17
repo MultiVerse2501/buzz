@@ -332,14 +332,14 @@ def _turns_from(activity: np.ndarray, frame_s: float) -> list:
 
 # --- diarization entry point ------------------------------------------------------
 
-def diarize_speaker_turns(audio: np.ndarray,
-                          num_speakers: int | None = None) -> list:
-    """Full pipeline → speaker turns as (start_ms, end_ms, spk_index) — the
+def _diarize_impl(audio: np.ndarray, sessions: dict,
+                  num_speakers: int | None = None) -> list:
+    """Full pipeline → speaker turns as (start_ms, end_ms, spk_1based) — the
     contract the speaker-identification worker's mapping stage consumes.
 
     num_speakers: exact count from the UI combo (clamps the detected k), or
     None for automatic detection (k capped at MAX_SPEAKERS)."""
-    sessions = _sessions()
+
     audio = np.asarray(audio, dtype=np.float32)
 
     # 1. speech + slot activity (pyannote segmentation, batch-32)
@@ -543,22 +543,20 @@ def diarize_speaker_turns(audio: np.ndarray,
 class NpuDiarizer:
     """The NPU backend shaped like upstream's diarizer wrappers
     (whisper_diarization.diarization.MSDDDiarizer / SortformerDiarizer):
-    construct, then .diarize(audio, num_speakers) -> [(start_ms, end_ms,
-    spk_1based)]. `audio` accepts the same torch tensor (1, N) float32
-    16 kHz the widget hands the NeMo wrappers, or a numpy array."""
+    construct with the target device — which opens and validates the three
+    QNN contexts, failing fast exactly like the NeMo wrappers' model
+    construction — then .diarize(audio, num_speakers) -> [(start_ms,
+    end_ms, spk_1based)]. `audio` accepts the same torch tensor (1, N)
+    float32 16 kHz the widget hands the NeMo wrappers, or a numpy array.
+
+    Sessions are cached per process: a second NpuDiarizer instance reuses
+    the already-open contexts."""
 
     def __init__(self, device=None):
         # `device` mirrors the NeMo wrappers' signature; the NPU is selected
         # by the QNN runtime, so it is intentionally ignored.
         self.device = device
-
-    @staticmethod
-    def available() -> bool:
-        return is_available()
-
-    @staticmethod
-    def assets() -> Path:
-        return assets_dir()
+        self._sessions = _sessions()
 
     def diarize(self, audio, num_speakers: int | None = None) -> list:
         try:
@@ -567,8 +565,8 @@ class NpuDiarizer:
                 audio = audio.detach().cpu().numpy().flatten()
         except ImportError:
             audio = np.asarray(audio).flatten()
-        return diarize_speaker_turns(np.asarray(audio, dtype=np.float32),
-                                     num_speakers=num_speakers)
+        return _diarize_impl(np.asarray(audio, dtype=np.float32),
+                             self._sessions, num_speakers=num_speakers)
 
 
 def create_diarizer(diarizer_name: str):
