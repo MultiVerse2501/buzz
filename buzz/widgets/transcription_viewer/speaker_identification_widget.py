@@ -344,12 +344,25 @@ class IdentificationWorker(QObject):
         # Snapdragon machines: run the diarization stage on the Hexagon NPU
         # (pyannote segmentation + titanet + MSDD decoder, NeMo-free) when the
         # assets are present. BUZZ_DIARIZER_NPU=0 forces the legacy path.
-        if self.diarizer == "msdd" and speaker_diarization_npu.is_available():
-            logging.debug(
-                "Speaker identification worker: Running MSDD diarization on the NPU"
-            )
-            return speaker_diarization_npu.diarize_speaker_turns(
+        legacy_available = self._MSDDDiarizer is not None
+        if speaker_diarization_npu.is_available():
+            if self.diarizer == "sortformer":
+                # the NPU pipeline implements the MSDD algorithm; sortformer
+                # has no NPU artifact yet
+                raise RuntimeError(
+                    "Sortformer diarization is not available on this NPU "
+                    "build. Use the MSDD diarizer.")
+            speaker_ts = speaker_diarization_npu.diarize_speaker_turns(
                 audio_waveform, num_speakers=self.num_speakers)
+            if not speaker_ts:
+                raise RuntimeError(
+                    "No speech segments were detected in this recording.")
+            return speaker_ts
+        if not legacy_available:
+            raise RuntimeError(
+                "Speaker identification needs either the NPU diarization "
+                f"assets (expected under {speaker_diarization_npu.assets_dir()}) "
+                "or the NeMo diarization stack (unavailable on this install).")
 
         # Silence NeMo's verbose logging
         logging.getLogger("nemo_logging").setLevel(logging.ERROR)

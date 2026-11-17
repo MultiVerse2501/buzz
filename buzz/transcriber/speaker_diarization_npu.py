@@ -81,8 +81,16 @@ def assets_dir() -> Path:
 
 
 def is_available() -> bool:
-    """All three model artifacts present (and not disabled by env)."""
+    """All three model artifacts present, on a supported chipset, and not
+    disabled by env. The compiled contexts are pinned to x-elite (HTP v73)
+    and x2-elite (HTP v81)."""
     if os.getenv("BUZZ_DIARIZER_NPU", "1") == "0":
+        return False
+    try:
+        from buzz.npu_capability import detected_chipset
+        if detected_chipset() not in ("x2-elite", "x-elite"):
+            return False
+    except Exception:
         return False
     d = assets_dir()
     needed = ["segmentation.bin", "segmentation.metadata.json",
@@ -517,12 +525,15 @@ def diarize_speaker_turns(audio: np.ndarray,
         f0 = int(np.floor(r0 / BASE_SHIFT))
         f1 = int(np.ceil(r1 / BASE_SHIFT))
         speech_frames[f0:min(f1, n_base)] = 1.0
+    # speaker ids are 1-based, matching the NeMo MSDD contract upstream
+    # ("spk_1"-derived labels; the UI renders "Speaker 1", "Speaker 2", ...)
     speaker_ts = []
     for c in range(k):
         act = ((speaker_probs[:, c] > BIN_THRESHOLD)
                & (speech_frames > 0.5)).astype(np.float32)
         for a, b in _turns_from(act, BASE_SHIFT):
-            speaker_ts.append((int(round(a * 1000)), int(round(b * 1000)), int(c)))
+            speaker_ts.append((int(round(a * 1000)), int(round(b * 1000)),
+                               int(c) + 1))
     speaker_ts.sort()
     logging.debug("Speaker diarization NPU: %d turns across %d speakers",
                   len(speaker_ts), k)
