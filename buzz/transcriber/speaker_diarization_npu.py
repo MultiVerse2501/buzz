@@ -29,6 +29,12 @@ Download-at-first-use rides the P3 GitHub-Releases hosting decision; until
 then the directory is provisioned out-of-band. All NPU sessions are opened
 lazily on first use and cached for the process lifetime. Set
 BUZZ_DIARIZER_NPU=0 to force the legacy (NeMo) diarizer path.
+
+The identification worker's aligner acoustic pass (its steps 3-5) reuses the
+transcription engine's compiled MMS-300m whole-graph — the asset behind
+BUZZ_MMS_ALIGNER_DIR — via create_emissions_provider(), so one asset serves
+the engine's word-timestamp arm and the speaker-identification emissions
+alike. Without it the worker falls back to the CPU torch aligner unchanged.
 """
 
 import json
@@ -581,3 +587,34 @@ def create_diarizer(diarizer_name: str):
     raise RuntimeError(
         f"The {diarizer_name} diarizer has no NPU implementation. "
         "Use the MSDD diarizer.")
+
+
+def create_emissions_provider():
+    """Factory for the identification worker's aligner acoustic pass: the
+    transcription engine's compiled MMS-300m whole-graph on the NPU when it
+    is configured (BUZZ_MMS_ALIGNER_DIR, the same asset the engine's
+    word-timestamp arm uses), None otherwise. None sends the worker down
+    upstream's CPU torch path unchanged; a failed load is logged and also
+    returns None, since the CPU path always works."""
+    try:
+        from buzz.transcriber.whisper_npu import _NpuMmsEmissions
+
+        return _NpuMmsEmissions.discover()
+    except Exception:
+        logging.warning(
+            "NPU emissions provider unavailable, using the CPU aligner",
+            exc_info=True)
+        return None
+
+
+def load_aligner_tokenizer():
+    """The forced aligner's tokenizer — the only host-side model of the NPU
+    emissions leg (the aligner glue uses the vocab; the acoustic model is
+    the compiled graph). The same load the CPU path does inside its
+    load_alignment_model, minus the torch model."""
+    from buzz.transcriber.whisper_npu import _MMS_ALIGNER_MODEL_REPO
+
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(
+        _MMS_ALIGNER_MODEL_REPO, word_delimiter_token=None)

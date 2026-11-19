@@ -304,6 +304,36 @@ class IdentificationWorker(QObject):
                     ) from e
         return alignment_model, alignment_tokenizer
 
+    def _load_alignment_tokenizer_with_retry(self):
+        """Tokenizer-only aligner load for the NPU emissions leg: the acoustic
+        model runs on the NPU, but the alignment glue still needs the vocab.
+        Same retry/offline treatment as the model load."""
+        for attempt in range(3):
+            try:
+                return speaker_diarization_npu.load_aligner_tokenizer()
+            except Exception as e:
+                if attempt < 2:
+                    logging.warning(
+                        f"Speaker identification: Failed to load alignment tokenizer "
+                        f"(attempt {attempt + 1}/3), retrying: {e}"
+                    )
+                    # On retry, try using cached models only (offline mode)
+                    try:
+                        import huggingface_hub.constants
+                        huggingface_hub.constants.HF_HUB_OFFLINE = True
+                        logging.debug("Speaker identification: Enabled HF offline mode")
+                    except Exception as offline_err:
+                        logging.warning(f"Failed to set offline mode: {offline_err}")
+                    self.progress_update.emit(
+                        _("3/8 Loading alignment model (retrying with cache...)")
+                    )
+                    time.sleep(2 ** attempt)  # 1s, 2s backoff
+                else:
+                    raise RuntimeError(
+                        _("Failed to load alignment model. "
+                          "Please check your internet connection and try again.")
+                    ) from e
+
     def _generate_emissions_and_cleanup(self, alignment_model, audio_waveform, device):
         import torch
 
@@ -319,6 +349,17 @@ class IdentificationWorker(QObject):
         finally:
             del alignment_model
             torch.cuda.empty_cache()
+
+    def _generate_emissions_npu(self, provider, audio_waveform):
+        """Aligner emissions from the transcription engine's compiled MMS-300m
+        graph on the NPU. Returns the same (torch CPU tensor, stride in ms)
+        the CPU path produces; the alignment glue converts to numpy itself."""
+        import torch
+
+        emissions = torch.from_numpy(provider.emissions(audio_waveform))
+        if emissions.size(0) < 2:
+            raise RuntimeError("Audio too short to align on the NPU.")
+        return emissions, provider.STRIDE_MS
 
     def _get_word_timestamps(
         self, full_transcript, language, emissions, stride, alignment_tokenizer, segments=None,
@@ -515,18 +556,33 @@ class IdentificationWorker(QObject):
                 return
 
             self.progress_update.emit(_("3/8 Loading alignment model"))
-            alignment_model, alignment_tokenizer = self._load_alignment_model_with_retry(
-                device, torch_dtype,
-            )
+            # Snapdragon machines: the acoustic pass runs on the NPU (the
+            # transcription engine's compiled MMS-300m graph) when that asset
+            # is configured; only the tokenizer is loaded host-side. Without
+            # it, upstream's CPU torch path runs unchanged.
+            emissions_provider = speaker_diarization_npu.create_emissions_provider()
+            if emissions_provider is not None:
+                logging.info(
+                    "Speaker identification: Aligner acoustic pass: MMS-300m on HTP")
+                alignment_tokenizer = self._load_alignment_tokenizer_with_retry()
+            else:
+                alignment_model, alignment_tokenizer = self._load_alignment_model_with_retry(
+                    device, torch_dtype,
+                )
 
             if self._cancel_if_requested("at step 4"):
                 return
 
             self.progress_update.emit(_("4/8 Processing audio"))
             logging.debug("Speaker identification worker: Generating emissions")
-            emissions, stride = self._generate_emissions_and_cleanup(
-                alignment_model, audio_waveform, device,
-            )
+            if emissions_provider is not None:
+                emissions, stride = self._generate_emissions_npu(
+                    emissions_provider, audio_waveform,
+                )
+            else:
+                emissions, stride = self._generate_emissions_and_cleanup(
+                    alignment_model, audio_waveform, device,
+                )
             alignment_model = None
             logging.debug("Speaker identification worker: Emissions generated")
 
