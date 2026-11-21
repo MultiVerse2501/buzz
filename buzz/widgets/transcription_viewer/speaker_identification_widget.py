@@ -5,7 +5,7 @@ import ssl
 import time
 import random
 from contextlib import contextmanager
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import UUID
 
 import numpy as np
@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QLayout,
 )
+from buzz import metadata_cache
 from buzz.locale import _
 from buzz.db.entity.transcription import Transcription
 from buzz.db.service.transcription_service import TranscriptionService
@@ -61,6 +62,8 @@ from buzz.transcriber.speaker_identifier import (
 
 # Longest speaker sample played by the "Play sample" button
 MAX_PREVIEW_DURATION_MS = 10 * 1000
+# Speaker names are saved to the metadata cache this long after the last edit
+CACHE_SAVE_DELAY_MS = 500
 
 
 def process_in_batches(
@@ -144,8 +147,55 @@ def hide_cuda_from_torch(device):
         torch.cuda.is_available = original_is_available
 
 
+def build_identification_metadata(
+    diarizer, num_speakers, language, word_timestamps, speaker_ts,
+    word_speaker_mapping, sentences,
+) -> dict:
+    """Data of one speaker identification run, for the metadata cache.
+
+    ``word_timestamps`` are in seconds, everything else in milliseconds.
+    """
+    return {
+        "diarizer": diarizer,
+        "num_speakers": num_speakers,
+        "language": language,
+        "speaker_turns": [
+            {"start_time": start, "end_time": end, "speaker": f"Speaker {speaker}"}
+            for start, end, speaker in speaker_ts
+        ],
+        "word_timestamps": word_timestamps,
+        "word_speaker_mapping": [
+            {**entry, "speaker": f"Speaker {entry['speaker']}"}
+            for entry in word_speaker_mapping
+        ],
+        "sentences": sentences,
+    }
+
+
+def _valid_sentences(data: Any) -> Optional[List[Dict]]:
+    """The ``sentences`` of cached identification data, if they can be shown."""
+    if not isinstance(data, dict):
+        return None
+    sentences = data.get("sentences")
+    if not isinstance(sentences, list) or not sentences:
+        return None
+    for sentence in sentences:
+        if not (
+            isinstance(sentence, dict)
+            and isinstance(sentence.get("speaker"), str)
+            and isinstance(sentence.get("text"), str)
+            and isinstance(sentence.get("start_time"), (int, float))
+            and isinstance(sentence.get("end_time"), (int, float))
+        ):
+            return None
+    return sentences
+
+
 class IdentificationWorker(QObject):
     finished = pyqtSignal(list)
+    # Emitted before ``finished`` when identification succeeds, with the data
+    # of the run that is not kept in the segments, see build_identification_metadata
+    metadata_ready = pyqtSignal(dict)
     progress_update = pyqtSignal(str)
     error = pyqtSignal(str)
 
@@ -170,6 +220,7 @@ class IdentificationWorker(QObject):
         self.file_path = file_path
         self.language = language
         self._is_cancelled = False
+        self.word_speaker_mapping = []
 
     def cancel(self):
         """Request cancellation of the worker."""
@@ -420,6 +471,7 @@ class IdentificationWorker(QObject):
 
         wsm = self._get_realigned_ws_mapping_with_punctuation(wsm)
         wsm = merge_word_pieces(wsm, word_timestamps)
+        self.word_speaker_mapping = wsm
         ssm = self._get_sentences_speaker_mapping(wsm, speaker_ts)
         return ssm
 
@@ -525,6 +577,13 @@ class IdentificationWorker(QObject):
 
             logging.debug("Speaker identification worker: Finished successfully")
             self.progress_update.emit(_("8/8 Identification done"))
+            try:
+                self.metadata_ready.emit(build_identification_metadata(
+                    self.diarizer, self.num_speakers, language, word_timestamps,
+                    speaker_ts, self.word_speaker_mapping, ssm,
+                ))
+            except Exception:
+                logging.exception("Speaker identification worker: Failed to collect metadata")
             self.finished.emit(ssm)
 
         except Exception as e:
@@ -581,9 +640,21 @@ class SpeakerIdentificationWidget(QWidget):
         self.transcription_service = transcription_service
         self.transcriptions_updated_signal = transcriptions_updated_signal
         self.identification_result = None
+        self.identification_metadata = None
+        # Metadata of the run in progress, until it finishes
+        self._pending_metadata = None
+        # Name inputs of the identified speakers, by speaker label
+        self._speaker_name_inputs: Dict[str, LineEdit] = {}
         self.thread = None
         self.worker = None
         self.needs_layout_update = False
+
+        # Speaker names are saved to the metadata cache a moment after the
+        # user stops typing, rather than on every key press
+        self._cache_save_timer = QTimer(self)
+        self._cache_save_timer.setSingleShot(True)
+        self._cache_save_timer.setInterval(CACHE_SAVE_DELAY_MS)
+        self._cache_save_timer.timeout.connect(self._save_to_metadata_cache)
 
         self.setMinimumWidth(650)
         self.setMinimumHeight(400)
@@ -600,6 +671,9 @@ class SpeakerIdentificationWidget(QWidget):
 
         self.setLayout(layout)
         self.destroyed.connect(self._on_destroyed)
+
+        self._load_previous_identification()
+        self.merge_speaker_sentences.toggled.connect(self._schedule_metadata_cache_save)
 
     def _create_step_1_group(self, layout: QFormLayout) -> None:
         step_1_label = QLabel(_("Step 1: Identify speakers"), self)
@@ -864,8 +938,13 @@ class SpeakerIdentificationWidget(QWidget):
         # Clean up any existing thread before starting a new one
         self._cleanup_thread()
 
+        # Names typed for the earlier result are kept, should the run fail
+        self._flush_metadata_cache_save()
+        self._set_results_enabled(False)
+
         SpeakerIdentificationWidget.active_running_instance = self
         self.identification_started.emit()
+        self._pending_metadata = None
 
         logging.debug("Speaker identification: Starting identification thread (%s)", diarizer)
 
@@ -878,6 +957,7 @@ class SpeakerIdentificationWidget(QWidget):
         )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
+        self.worker.metadata_ready.connect(self._on_metadata_ready)
         self.worker.finished.connect(self._on_thread_finished)
         self.worker.progress_update.connect(self.on_progress_update)
         self.worker.error.connect(self.on_identification_error)
@@ -900,6 +980,7 @@ class SpeakerIdentificationWidget(QWidget):
         self.progress_label.setText(_("Cancelled"))
         self.progress_bar.setValue(0)
         self._show_model_selector()
+        self._set_results_enabled(bool(self.identification_result))
 
     def _reset_buttons(self):
         """Reset identify/cancel buttons to initial state."""
@@ -907,6 +988,14 @@ class SpeakerIdentificationWidget(QWidget):
         self.step_1_button.setEnabled(True)
         self.cancel_button.setVisible(False)
         self.cancel_button.setEnabled(True)
+
+    def _on_metadata_ready(self, metadata: dict):
+        self._pending_metadata = metadata
+
+    def _set_results_enabled(self, enabled: bool) -> None:
+        self.step_2_group_box.setEnabled(enabled)
+        self.merge_speaker_sentences.setEnabled(enabled)
+        self.save_button.setEnabled(enabled)
 
     def _on_thread_finished(self, result):
         """Handle thread completion and cleanup."""
@@ -923,6 +1012,8 @@ class SpeakerIdentificationWidget(QWidget):
         self._reset_buttons()
         self.progress_bar.setValue(0)
         self._show_model_selector()
+        # The result of an earlier run is still there to name and save
+        self._set_results_enabled(bool(self.identification_result))
 
     def _show_model_selector(self):
         """Restore the model selector in place of the progress bar."""
@@ -940,21 +1031,30 @@ class SpeakerIdentificationWidget(QWidget):
             logging.error(f"Invalid progress format: {progress}")
 
         if progress_value == 8:
-            self.step_2_group_box.setEnabled(True)
-            self.merge_speaker_sentences.setEnabled(True)
-            self.save_button.setEnabled(True)
+            self._set_results_enabled(True)
 
     def on_identification_finished(self, result):
-        self.identification_result = result
+        metadata, self._pending_metadata = self._pending_metadata, None
 
-        # Handle empty results (error case)
+        # Handle empty results (error case). The result of an earlier run, if
+        # any, stays.
         if not result:
             logging.debug("Speaker identification: Empty result received")
             return
 
-        unique_speakers = {entry['speaker'] for entry in result}
+        self.identification_result = result
+        self.identification_metadata = metadata
+        self._show_speakers({})
+        # Replaces the result of an earlier run, with the names given to it
+        self._cache_save_timer.stop()
+        self._save_to_metadata_cache()
+
+    def _show_speakers(self, speaker_names: Dict[str, str]) -> None:
+        """A name input and sample button for each speaker of the result."""
+        unique_speakers = {entry['speaker'] for entry in self.identification_result}
 
         self._preview_buttons = []
+        self._speaker_name_inputs = {}
         while self.speaker_preview_row.count():
             item = self.speaker_preview_row.takeAt(0)
             widget = item.widget()
@@ -970,8 +1070,10 @@ class SpeakerIdentificationWidget(QWidget):
                             sub_widget.deleteLater()
 
         for speaker in sorted(unique_speakers):
-            speaker_input = LineEdit(speaker, self)
+            speaker_input = LineEdit(speaker_names.get(speaker, speaker), self)
             speaker_input.setMinimumWidth(200)
+            speaker_input.textChanged.connect(self._schedule_metadata_cache_save)
+            self._speaker_name_inputs[speaker] = speaker_input
 
             speaker_preview_button = self._create_preview_button(speaker)
 
@@ -1026,20 +1128,93 @@ class SpeakerIdentificationWidget(QWidget):
         if self.player is not None:
             self.player.stop()
 
-    def on_save_button_clicked(self):
-        speaker_names = []
-        for i in range(self.speaker_preview_row.count()):
-            item = self.speaker_preview_row.itemAt(i)
-            if item.layout():
-                for j in range(item.layout().count()):
-                    sub_item = item.layout().itemAt(j)
-                    widget = sub_item.widget()
-                    if isinstance(widget, LineEdit):
-                        speaker_names.append(widget.text())
+    def _speaker_mapping(self) -> Dict[str, str]:
+        """Names the user gave the identified speakers, by speaker label."""
+        return {
+            speaker: speaker_input.text()
+            for speaker, speaker_input in self._speaker_name_inputs.items()
+        }
 
-        unique_speakers = {entry['speaker'] for entry in self.identification_result}
-        original_speakers = sorted(unique_speakers)
-        speaker_mapping = dict(zip(original_speakers, speaker_names))
+    def _cache_data(self) -> Dict[str, Any]:
+        """The ``speaker_identification`` metadata of the shown result."""
+        return {
+            **(self.identification_metadata or {}),
+            "sentences": self.identification_result,
+            "speaker_names": self._speaker_mapping(),
+            "merge_speaker_sentences": self.merge_speaker_sentences.isChecked(),
+        }
+
+    def _schedule_metadata_cache_save(self, *_args) -> None:
+        if self.identification_result:
+            self._cache_save_timer.start()
+
+    def _flush_metadata_cache_save(self) -> None:
+        if self._cache_save_timer.isActive():
+            self._cache_save_timer.stop()
+            self._save_to_metadata_cache()
+
+    def _save_to_metadata_cache(self) -> None:
+        """Keep the shown result for the next time the dialog is opened."""
+        if not self.identification_result:
+            return
+        metadata_cache.save_metadata(
+            self.transcription.id,
+            metadata_cache.SPEAKER_IDENTIFICATION,
+            self._cache_data(),
+        )
+
+    def _load_previous_identification(self) -> None:
+        """Show the result of an earlier identification of this transcript."""
+        try:
+            data = metadata_cache.load_metadata(
+                self.transcription.id, metadata_cache.SPEAKER_IDENTIFICATION
+            )
+        except Exception:
+            logging.exception(
+                "Speaker identification: could not read the previous result of %s",
+                self.transcription.id,
+            )
+            return
+        sentences = _valid_sentences(data)
+        if not sentences:
+            return
+
+        speaker_names = data.get("speaker_names")
+        if not isinstance(speaker_names, dict):
+            speaker_names = {}
+        speaker_names = {
+            speaker: name
+            for speaker, name in speaker_names.items()
+            if isinstance(name, str)
+        }
+
+        self.identification_result = sentences
+        self.identification_metadata = {
+            key: value
+            for key, value in data.items()
+            if key not in ("speaker_names", "merge_speaker_sentences")
+        }
+
+        # Start from the settings of that run, the user may change them to
+        # identify the speakers again
+        if data.get("diarizer") == "sortformer":
+            self.sortformer_radio.setChecked(True)
+        else:
+            index = self.speaker_count_combo.findData(data.get("num_speakers"))
+            if index >= 0:
+                self.speaker_count_combo.setCurrentIndex(index)
+        merge = data.get("merge_speaker_sentences")
+        if isinstance(merge, bool):
+            self.merge_speaker_sentences.setChecked(merge)
+
+        self._show_speakers(speaker_names)
+        self._set_results_enabled(True)
+        if os.path.isfile(self.transcription.file):
+            self.progress_label.setText(_("Showing the result of the previous identification"))
+
+    def on_save_button_clicked(self):
+        speaker_mapping = self._speaker_mapping()
+        self._flush_metadata_cache_save()
 
         segments = build_speaker_segments(
             self.identification_result,
@@ -1049,6 +1224,11 @@ class SpeakerIdentificationWidget(QWidget):
 
         new_transcript_id = self.transcription_service.copy_transcription_with_segments(
             self.transcription.id_as_uuid, segments
+        )
+        metadata_cache.save_metadata(
+            new_transcript_id,
+            metadata_cache.SPEAKER_IDENTIFICATION,
+            self._cache_data(),
         )
 
         # TODO - See if we can get rows in the transcription viewer to be of variable height
@@ -1081,6 +1261,9 @@ class SpeakerIdentificationWidget(QWidget):
 
     def closeEvent(self, event):
         self.hide()
+
+        # Keep speaker names typed just before closing
+        self._flush_metadata_cache_save()
 
         # Stop playback and release the decoded audio
         self._stop_playback()

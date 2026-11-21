@@ -47,6 +47,9 @@ from buzz.widgets.menu_bar import MenuBar
 from buzz.widgets.system_tray import SystemTray
 from buzz.widgets.preferences_dialog.models.preferences import Preferences
 from buzz.widgets.transcriber.file_transcriber_widget import FileTranscriberWidget
+from buzz.widgets.transcriber.speaker_identification_options_widget import (
+    SpeakerIdentificationOptions,
+)
 from buzz.widgets.transcription_task_folder_watcher import (
     TranscriptionTaskFolderWatcher,
 )
@@ -270,9 +273,26 @@ class MainWindow(QMainWindow):
         self.open_file_transcriber_widget(file_paths=file_paths)
 
     def on_file_transcriber_triggered(
-        self, options: Tuple[TranscriptionOptions, FileTranscriptionOptions, str]
+        self,
+        options: Tuple[
+            TranscriptionOptions,
+            FileTranscriptionOptions,
+            str,
+            SpeakerIdentificationOptions,
+        ],
     ):
-        transcription_options, file_transcription_options, model_path = options
+        (
+            transcription_options,
+            file_transcription_options,
+            model_path,
+            speaker_options,
+        ) = options
+        speaker_task_options = dict(
+            identify_speakers=speaker_options.identify_speakers,
+            speaker_diarizer=speaker_options.speaker_diarizer,
+            speaker_count=speaker_options.speaker_count,
+            merge_speaker_sentences=speaker_options.merge_speaker_sentences,
+        )
 
         if file_transcription_options.file_paths is not None:
             for file_path in file_transcription_options.file_paths:
@@ -282,6 +302,7 @@ class MainWindow(QMainWindow):
                     model_path=model_path,
                     file_path=file_path,
                     source=FileTranscriptionTask.Source.FILE_IMPORT,
+                    **speaker_task_options,
                 )
                 self.add_task(task)
         else:
@@ -291,6 +312,7 @@ class MainWindow(QMainWindow):
                 model_path=model_path,
                 url=file_transcription_options.url,
                 source=FileTranscriptionTask.Source.URL_IMPORT,
+                **speaker_task_options,
             )
             self.add_task(task)
 
@@ -536,6 +558,7 @@ class MainWindow(QMainWindow):
         # row, or turn a canceled one into completed.
         if self.transcription_service.is_transcription_deleted_or_canceled(task.uid):
             logging.debug(f"Ignoring result of deleted or canceled task {task.uid}")
+            self.delete_metadata_if_transcription_deleted(task)
             self.quit_if_all_tasks_done(task)
             return
 
@@ -618,10 +641,17 @@ class MainWindow(QMainWindow):
 
         self.system_tray.quit()
 
+    def delete_metadata_if_transcription_deleted(self, task: FileTranscriptionTask):
+        # The transcriber may save metadata after the transcription was deleted
+        if self.transcription_service.is_transcription_deleted(task.uid):
+            self.transcription_service.delete_transcription_metadata(task.uid)
+
     def on_task_error(self, task: FileTranscriptionTask, error: str):
         if not self.transcription_service.is_transcription_deleted_or_canceled(task.uid):
             self.transcription_service.update_transcription_as_failed(task.uid, error)
             self.table_widget.refresh_row(task.uid)
+        else:
+            self.delete_metadata_if_transcription_deleted(task)
 
         self.quit_if_all_tasks_done(task)
 
