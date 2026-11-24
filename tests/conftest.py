@@ -248,3 +248,85 @@ def metadata_dir(tmp_path, monkeypatch):
     path = tmp_path / "metadata"
     monkeypatch.setenv("BUZZ_METADATA_DIR", str(path))
     return path
+
+
+# --- Windows ARM64 battery support (fork) --------------------------------
+# pytest.ini runs with -x: a single runtime engine failure would halt the
+# whole battery. On machines where the whisper / faster_whisper wheels are
+# not installed (Windows ARM64: they are platform-marker-excluded in
+# pyproject), skip exactly the items that exercise those engines. With the
+# engines installed (x64 CI) nothing is skipped. The symlink test is
+# skipped when Windows symlink privilege is absent (WinError 1314 without
+# developer mode / admin).
+
+
+def _missing_engine_modules() -> list:
+    import importlib.util
+
+    return [m for m in ("whisper", "faster_whisper", "nemo")
+            if importlib.util.find_spec(m) is None]
+
+
+_ENGINE_ITEM_RULES = (
+    # (nodeid fragment, engines the item needs to run)
+    ("tests/model_loader_test.py::TestGetWhisperFilePath", ("whisper",)),
+    ("tests/model_loader_test.py::TestTranscriptionModelGetLocalModelPath::test_whisper_file", ("whisper",)),
+    ("tests/cli_test.py::TestCLI::test_cli_multiple_files", ("whisper",)),
+    ("tests/recording_transcriber_test.py::TestModelBackends::test_faster_whisper", ("faster_whisper",)),
+    ("tests/recording_transcriber_test.py::TestStartWithSilence", ("whisper",)),
+    ("tests/recording_transcriber_test.py::TestStartPortAudioError", ("whisper",)),
+    ("tests/transcriber/whisper_file_transcriber_test.py::TestTranscriberMetadata::test_faster_whisper", ("faster_whisper",)),
+    ("tests/transcriber/whisper_file_transcriber_test.py::TestTranscriberMetadata::test_openai_whisper", ("whisper",)),
+    ("tests/transcriber/whisper_file_transcriber_test.py::TestWhisperFileTranscriber::test_transcribe_from_file", ("whisper", "faster_whisper")),
+    ("tests/transcriber/whisper_file_transcriber_test.py::TestWhisperFileTranscriber::test_transcribe_from_url", ("whisper", "faster_whisper")),
+    ("tests/transcriber/whisper_file_transcriber_test.py::TestWhisperFileTranscriber::test_transcribe_from_folder_watch_source", ("whisper", "faster_whisper")),
+    # Main-window task-running tests drive real transcriptions through the
+    # worker with an explicit OpenAI Whisper model (engine wheels absent ->
+    # task errors before any row status the tests wait for; on this machine
+    # the run also hard-crashes Qt locally, the known §22a exclusion).
+    ("tests/widgets/main_window_test.py::TestMainWindow::test_should_run", ("whisper",)),
+    # The sortformer speaker_count test drives upstream's legacy (NeMo)
+    # diarizer wiring; the NPU fork can't provide it on NeMo-less installs.
+    ("tests/widgets/speaker_count_test.py::test_sortformer_diarization_does_not_receive_speaker_count", ("nemo",)),
+)
+
+
+def _windows_symlink_privilege() -> bool:
+    import tempfile
+
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "t")
+            open(target, "w").close()
+            os.symlink(target, os.path.join(d, "l"))
+        return True
+    except OSError:
+        return False
+
+
+def pytest_collection_modifyitems(config, items):
+    missing = _missing_engine_modules()
+    symlink_ok = (_windows_symlink_privilege()
+                  if platform.system() == "Windows" else True)
+    for item in items:
+        nodeid = item.nodeid.replace("\\", "/")
+        for fragment, engines in _ENGINE_ITEM_RULES:
+            needed = [e for e in engines if e in missing]
+            if fragment in nodeid and needed:
+                item.add_marker(pytest.mark.skip(
+                    reason=f"engine wheels not installed: {', '.join(needed)}"))
+                break
+        if not symlink_ok and "test_skips_the_current_symlink" in nodeid:
+            item.add_marker(pytest.mark.skip(
+                reason="Windows symlink privilege not held (WinError 1314)"))
+
+
+@pytest.fixture(autouse=True)
+def _legacy_diarizer_for_speaker_count_tests(request, monkeypatch):
+    """The speaker_count tests patch upstream's inline diarizer classes on
+    the identification worker; the fork's factory dispatch (NPU diarizer on
+    by default) would bypass those mocks. Run them against the legacy
+    selection path — deterministic on every platform, and the only path
+    those tests actually exercise."""
+    if "speaker_count_test.py" in request.node.nodeid.replace("\\", "/"):
+        monkeypatch.setenv("BUZZ_DIARIZER_NPU", "0")

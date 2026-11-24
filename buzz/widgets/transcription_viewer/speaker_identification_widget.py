@@ -215,6 +215,12 @@ class IdentificationWorker(QObject):
         self.transcription_service = transcription_service
         self.diarizer = diarizer
         self.num_speakers = num_speakers
+        # Legacy (NeMo) diarizer classes: assigned by _import_libraries when
+        # the NeMo stack imports; seeded None here so the guards in
+        # _run_diarization behave as designed (clear error, not
+        # AttributeError) before/without that lazy import.
+        self._MSDDDiarizer = None
+        self._SortformerDiarizer = None
         # Optional overrides so the worker can run on transcripts that are not
         # (yet) stored in the database, such as folder watch transcriptions.
         self.segments = segments

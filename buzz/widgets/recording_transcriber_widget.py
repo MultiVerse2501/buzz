@@ -125,7 +125,10 @@ class RecordingTranscriberWidget(QWidget):
     def _get_selected_model(self, model_types: list[ModelType]) -> Optional[TranscriptionModel]:
         default_model: Optional[TranscriptionModel] = None
         if len(model_types) > 0:
-            default_model = TranscriptionModel(model_type=model_types[0])
+            # The same default the file-transcription preferences use
+            # (NPU-first where available); this widget used to pick the
+            # first combo entry instead.
+            default_model = TranscriptionModel.default()
 
         selected_model = self.settings.value(
             key=Settings.Key.RECORDING_TRANSCRIBER_MODEL,

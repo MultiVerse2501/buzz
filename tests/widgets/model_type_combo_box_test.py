@@ -25,6 +25,15 @@ class TestModelTypeComboBox:
                         "OpenAI Whisper",
                         "OpenAI Whisper API",
                     ]
+                ) if not (platform.system() == "Windows" and platform.machine() == "ARM64") else (
+                    # The whisper/faster_whisper wheels are
+                    # platform-marker-excluded on Windows ARM64, so
+                    # is_available() filters them out of the combo
+                    [
+                        "Whisper.cpp",
+                        "Hugging Face",
+                        "OpenAI Whisper API",
+                    ]
                 ) + (
                     # the NPU engine is listed only where its stack is
                     # available (Windows ARM64) — mirrors the widget's

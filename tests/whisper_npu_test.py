@@ -618,8 +618,15 @@ class TestNpuCtcEmissions:
 class TestNpuMmsEmissions:
     """The cloud-built MMS-300m emissions backend (unit: no device needed)."""
 
-    def test_discover_none_without_env(self, monkeypatch):
+    def test_discover_none_without_env(self, monkeypatch, tmp_path):
+        # Without the env var, discovery falls back to the model-root
+        # default; with an isolated empty root (and a dead asset base so
+        # provisioning fails fast instead of hitting the network) there is
+        # nothing to find. model_root_dir is bound at import, so patch the
+        # attribute (the discover path reads it per call).
         monkeypatch.delenv("BUZZ_MMS_ALIGNER_DIR", raising=False)
+        monkeypatch.setattr("buzz.model_loader.model_root_dir", str(tmp_path))
+        monkeypatch.setenv("BUZZ_NPU_ASSETS_BASE", "http://127.0.0.1:9")
         assert whisper_npu._NpuMmsEmissions.discover() is None
 
     def test_discover_none_when_asset_missing(self, monkeypatch, tmp_path):
