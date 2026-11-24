@@ -9,6 +9,26 @@ from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 from buzz.__version__ import VERSION
 
 datas = []
+
+
+def optional_metadata(name: str):
+    # NeMo-cluster metadata: the fork's ARM64 environments exclude
+    # nemo/lhotse (pyproject platform markers), so these may be absent.
+    try:
+        return copy_metadata(name)
+    except Exception:
+        print(f"{name} not installed, skipping its metadata")
+        return []
+
+
+def optional_data(name: str, **kwargs):
+    try:
+        return collect_data_files(name, **kwargs)
+    except Exception:
+        print(f"{name} not installed, skipping its data files")
+        return []
+
+
 datas += collect_data_files("torch")
 datas += collect_data_files("demucs")
 datas += copy_metadata("tqdm")
@@ -25,9 +45,9 @@ datas += copy_metadata("pyyaml")
 datas += copy_metadata("julius")
 datas += copy_metadata("lameenc")
 datas += copy_metadata("einops")
-datas += copy_metadata("hydra-core")
+datas += optional_metadata("hydra-core")
 datas += copy_metadata("soundfile")
-datas += copy_metadata("lhotse")
+datas += optional_metadata("lhotse")
 
 # Catch build failure on Intel Macs
 try:
@@ -46,9 +66,14 @@ datas += collect_data_files("demucs", include_py_files=True)
 datas += collect_data_files("whisper_diarization", include_py_files=True)
 datas += collect_data_files("deepmultilingualpunctuation", include_py_files=True)
 datas += collect_data_files("ctc_forced_aligner", include_py_files=True, excludes=["build"])
-datas += collect_data_files("nemo", include_py_files=True)
-datas += collect_data_files("lightning_fabric", include_py_files=True)
-datas += collect_data_files("pytorch_lightning", include_py_files=True)
+# QNN runtime payload (QnnHtp.dll + V68/V73/V81 stubs/skels/catalogs,
+# onnxruntime_providers_qnn.dll): loaded by path at runtime, invisible to
+# import analysis — without this the frozen app has no NPU (win-arm64 only;
+# the wheel is gated to that platform so other builds collect nothing).
+datas += collect_data_files("onnxruntime_qnn")
+datas += optional_data("nemo", include_py_files=True)
+datas += optional_data("lightning_fabric", include_py_files=True)
+datas += optional_data("pytorch_lightning", include_py_files=True)
 datas += [("buzz/assets/*", "assets")]
 datas += [("buzz/locale", "locale")]
 datas += [("buzz/schema.sql", ".")]
