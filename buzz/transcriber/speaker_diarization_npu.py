@@ -32,9 +32,10 @@ BUZZ_DIARIZER_NPU=0 to force the legacy (NeMo) diarizer path.
 
 The identification worker's aligner acoustic pass (its steps 3-5) reuses the
 transcription engine's compiled MMS-300m whole-graph — the asset behind
-BUZZ_MMS_ALIGNER_DIR — via create_emissions_provider(), so one asset serves
-the engine's word-timestamp arm and the speaker-identification emissions
-alike. Without it the worker falls back to the CPU torch aligner unchanged.
+BUZZ_MMS_ALIGNER_DIR or `<model_root>/mms-aligner-npu/<chipset>/` — via
+create_emissions_provider(), so one asset serves the engine's word-timestamp
+arm and the speaker-identification emissions alike. Without it the worker
+falls back to the CPU torch aligner unchanged.
 """
 
 import json
@@ -66,6 +67,19 @@ MIN_TURN_S = 0.2
 CLUSTER_THRESHOLD = 0.45
 MAX_SPEAKERS = 8
 ASSET_SUBDIR = "speaker-id-npu"
+
+ASSET_FILES = ("segmentation.bin", "segmentation.metadata.json",
+               "titanet.onnx", "titanet.bin", "msdd.onnx", "msdd.bin")
+
+# Registry row for the trio bundle (titanet + MSDD are our AI Hub v73
+# compiles — universal: v73 contexts run on both chipsets — plus the
+# Qualcomm prebuilt v73 segmentation), same pinning as WHISPER_NPU_ASSETS,
+# served from the fork's npu-assets release.
+SPEAKER_ID_NPU_ASSET = {
+    "file": "speaker-id-npu-qairt250.zip",
+    "sha256": "df903665af1b1508b294eeeb508a91aec3b7201d447d03638ab9327b9a759141",
+    "zip_bytes": 102169074,
+}
 
 _ASSETS_CHECKED = False
 _SESSIONS = None            # {name: InferenceSession} (cached)
@@ -99,9 +113,44 @@ def is_available() -> bool:
     except Exception:
         return False
     d = assets_dir()
-    needed = ["segmentation.bin", "segmentation.metadata.json",
-              "titanet.onnx", "titanet.bin", "msdd.onnx", "msdd.bin"]
-    return all((d / f).is_file() for f in needed)
+    return all((d / f).is_file() for f in ASSET_FILES)
+
+
+def _ensure_assets() -> bool:
+    """Download-on-first-use for the trio bundle (no-op when the six files
+    are present). Only attempts on a supported chipset with the NPU
+    diarizer enabled; failures return False and callers treat the NPU path
+    as unavailable."""
+    if os.getenv("BUZZ_DIARIZER_NPU", "1") == "0":
+        return False
+    try:
+        from buzz.npu_capability import detected_chipset
+        if detected_chipset() not in ("x2-elite", "x-elite"):
+            return False
+    except Exception:
+        return False
+    if all((assets_dir() / f).is_file() for f in ASSET_FILES):
+        return True
+    try:
+        from buzz.model_loader import (download_npu_asset_zip,
+                                       extract_npu_asset_zip, npu_asset_url)
+
+        d = assets_dir()
+        os.makedirs(d.parent, exist_ok=True)
+        zip_path = str(d.parent / SPEAKER_ID_NPU_ASSET["file"])
+        if not os.path.isfile(zip_path):
+            if not download_npu_asset_zip(
+                    npu_asset_url(SPEAKER_ID_NPU_ASSET["file"]), zip_path,
+                    SPEAKER_ID_NPU_ASSET["sha256"],
+                    SPEAKER_ID_NPU_ASSET["zip_bytes"]):
+                return False
+        if not extract_npu_asset_zip(zip_path, str(d)):
+            return False
+    except Exception:
+        logging.warning("Speaker-ID NPU asset provisioning failed",
+                        exc_info=True)
+        return False
+    return is_available()
 
 
 def _sessions() -> dict:
@@ -118,6 +167,7 @@ def _sessions() -> dict:
         raise RuntimeError(
             "NPU speaker diarization: no QNN devices available.")
     d = assets_dir()
+    _ensure_assets()
     if not is_available():
         raise RuntimeError(
             "NPU speaker diarization assets are missing from "
@@ -581,6 +631,8 @@ def create_diarizer(diarizer_name: str):
     when the NPU is unavailable (caller falls back to the legacy NeMo path),
     and raises a clear error for a diarizer that has no NPU artifact."""
     if not is_available():
+        _ensure_assets()  # download-on-first-use; no-op when present
+    if not is_available():
         return None
     if diarizer_name == "msdd":
         return NpuDiarizer()
@@ -592,10 +644,10 @@ def create_diarizer(diarizer_name: str):
 def create_emissions_provider():
     """Factory for the identification worker's aligner acoustic pass: the
     transcription engine's compiled MMS-300m whole-graph on the NPU when it
-    is configured (BUZZ_MMS_ALIGNER_DIR, the same asset the engine's
-    word-timestamp arm uses), None otherwise. None sends the worker down
-    upstream's CPU torch path unchanged; a failed load is logged and also
-    returns None, since the CPU path always works."""
+    is configured (BUZZ_MMS_ALIGNER_DIR or the model-root default — the same
+    asset the engine's word-timestamp arm uses), None otherwise. None sends
+    the worker down upstream's CPU torch path unchanged; a failed load is
+    logged and also returns None, since the CPU path always works."""
     try:
         from buzz.transcriber.whisper_npu import _NpuMmsEmissions
 

@@ -455,7 +455,24 @@ class _NpuCtcEmissions:
 
 
 _MMS_ALIGNER_DIR_ENV = "BUZZ_MMS_ALIGNER_DIR"
+_MMS_ALIGNER_ASSET_SUBDIR = "mms-aligner-npu"
 _MMS_ALIGNER_MODEL_REPO = "MahmoudAshraf/mms-300m-1130-forced-aligner"
+
+# Registry rows for the compiled MMS whole-graph (our AI Hub compiles,
+# QAIRT 2.50.0.260828221209) — same {file, sha256, zip_bytes} pinning as
+# WHISPER_NPU_ASSETS, served from the fork's npu-assets release.
+_MMS_ALIGNER_ASSETS = {
+    "x2-elite": {
+        "file": "mms-300m-fp16-x2-elite-qairt250.zip",
+        "sha256": "30572c4c2956b5e6a041bc28737ced6baa64e10e9e259c56a65921eeb71f9bb2",
+        "zip_bytes": 643927460,
+    },
+    "x-elite": {
+        "file": "mms-300m-fp16-x-elite-qairt250.zip",
+        "sha256": "2d51805a87601a5d93db89c7e5ce75028dfd38755c5ee451bfe74ce88356a019",
+        "zip_bytes": 643472806,
+    },
+}
 
 
 class _NpuMmsEmissions:
@@ -502,15 +519,81 @@ class _NpuMmsEmissions:
                          "tensor(float)": np.float32}[declared]
 
     @classmethod
+    def _default_asset_dirs(cls) -> list:
+        """Model-root candidates for the compiled MMS graph: the detected
+        chipset's directory first, then the v73 directory on v81 devices
+        (v73 contexts run on v81, never the reverse). Empty when off the
+        supported chipsets."""
+        try:
+            from buzz.model_loader import model_root_dir
+            from buzz.npu_capability import detected_chipset
+
+            chipset = detected_chipset()
+        except Exception:
+            return []
+        if chipset not in ("x2-elite", "x-elite"):
+            return []
+        chipsets = [chipset] if chipset == "x-elite" else [chipset, "x-elite"]
+        return [os.path.join(model_root_dir, _MMS_ALIGNER_ASSET_SUBDIR, cs)
+                for cs in chipsets]
+
+    @classmethod
+    def _ensure_asset(cls, chipset: str) -> bool:
+        """Download-on-first-use for the compiled MMS graph (no-op when the
+        chipset's directory already has model.onnx). Failures return False
+        and the CPU aligner takes over, exactly as before the row existed."""
+        try:
+            from buzz.model_loader import (download_npu_asset_zip,
+                                           extract_npu_asset_zip,
+                                           model_root_dir, npu_asset_url)
+
+            asset = _MMS_ALIGNER_ASSETS.get(chipset)
+            if asset is None:
+                return False
+            subdir = os.path.join(model_root_dir, _MMS_ALIGNER_ASSET_SUBDIR)
+            dest = os.path.join(subdir, chipset)
+            if os.path.isfile(os.path.join(dest, "model.onnx")):
+                return True
+            os.makedirs(subdir, exist_ok=True)
+            zip_path = os.path.join(subdir, asset["file"])
+            if not os.path.isfile(zip_path):
+                if not download_npu_asset_zip(npu_asset_url(asset["file"]),
+                                              zip_path, asset["sha256"],
+                                              asset["zip_bytes"]):
+                    return False
+            if not extract_npu_asset_zip(zip_path, dest):
+                return False
+            return os.path.isfile(os.path.join(dest, "model.onnx"))
+        except Exception:
+            logger.warning("MMS aligner asset provisioning failed",
+                           exc_info=True)
+            return False
+
+    @classmethod
     def discover(cls) -> Optional["_NpuMmsEmissions"]:
         """The configured MMS aligner graph, or None (caller falls back to CPU).
 
-        Point ``BUZZ_MMS_ALIGNER_DIR`` at the AI Hub whole-graph directory
-        (wrapper ``model.onnx`` + ``model.bin`` context beside it). Download
-        and bundling of this asset is not productized yet — without it the
-        aligner runs its acoustic model on CPU (MMS-300m) exactly as before.
+        Resolution order: ``BUZZ_MMS_ALIGNER_DIR`` (honored exactly when
+        set), else ``<model_root>/mms-aligner-npu/<chipset>/`` with the v73
+        directory as fallback on v81 devices — populated on first use from
+        the npu-assets registry row for the detected chipset. Without a
+        graph the aligner runs its acoustic model on CPU (MMS-300m) exactly
+        as before.
         """
         asset_dir = os.getenv(_MMS_ALIGNER_DIR_ENV)
+        if not asset_dir:
+            try:
+                from buzz.npu_capability import detected_chipset
+
+                chipset = detected_chipset()
+            except Exception:
+                chipset = None
+            if chipset:
+                cls._ensure_asset(chipset)
+            for candidate in cls._default_asset_dirs():
+                if os.path.isfile(os.path.join(candidate, "model.onnx")):
+                    asset_dir = candidate
+                    break
         if not asset_dir or not os.path.isfile(
                 os.path.join(asset_dir, "model.onnx")):
             return None

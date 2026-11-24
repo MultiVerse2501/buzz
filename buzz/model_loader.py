@@ -159,6 +159,84 @@ WHISPER_NPU_ASSET_FILES = (
     "encoder.onnx", "encoder.bin", "decoder.onnx", "decoder.bin", "metadata.json",
 )
 
+# --- NPU asset bundles the fork distributes itself (buzz-npu-assets repo) ---
+# Base URL of the GitHub Releases "npu-assets-vN" tag; the per-asset rows
+# live next to their consumers (whisper_npu.py, speaker_diarization_npu.py)
+# with the same {file, sha256, zip_bytes} pinning as WHISPER_NPU_ASSETS.
+# BUZZ_NPU_ASSETS_BASE repoints the base for staging/tests.
+NPU_ASSETS_BASE = (
+    "https://github.com/MultiVerse2501/buzz-npu-assets/releases/download"
+    "/npu-assets-v1"
+)
+
+
+def npu_asset_url(file_name: str) -> str:
+    return "/".join((os.getenv("BUZZ_NPU_ASSETS_BASE", NPU_ASSETS_BASE),
+                     file_name))
+
+
+def download_npu_asset_zip(url: str, zip_path: str, sha256: str,
+                           zip_bytes: int) -> bool:
+    """Fetch one npu-assets bundle, verifying sha256 and byte size (the same
+    contract WHISPER_NPU_ASSETS pins). A failed or partial fetch is deleted;
+    the caller treats False as asset-unavailable."""
+    import hashlib
+
+    import requests
+
+    part = zip_path + ".part"
+    try:
+        logging.info("Downloading NPU asset %s", url)
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            h = hashlib.sha256()
+            seen = 0
+            with open(part, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    f.write(chunk)
+                    h.update(chunk)
+                    seen += len(chunk)
+        if seen != zip_bytes:
+            raise RuntimeError(f"NPU asset size mismatch: {seen} != {zip_bytes}")
+        if h.hexdigest() != sha256:
+            raise RuntimeError("NPU asset sha256 mismatch")
+        os.replace(part, zip_path)
+        return True
+    except Exception:
+        logging.warning("NPU asset download failed: %s", url, exc_info=True)
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        return False
+
+
+def extract_npu_asset_zip(zip_path: str, dest_dir: str) -> bool:
+    """Extract a bundle into dest_dir (bundles carry model files +
+    metadata.json + LICENSE/ATTRIBUTION + SHA256SUMS). Zip-slip guarded;
+    extracts into a temp dir swapped into place so a partial extraction
+    never looks like a complete asset."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            names = [n for n in z.namelist() if not n.endswith("/")]
+            root = os.path.abspath(dest_dir)
+            for n in names:
+                if not os.path.abspath(os.path.join(dest_dir, n)).startswith(
+                        root + os.sep):
+                    raise RuntimeError(f"zip escapes destination: {n}")
+            tmp = dest_dir + ".extracting"
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp, exist_ok=True)
+            z.extractall(tmp)
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        os.replace(tmp, dest_dir)
+        return True
+    except Exception:
+        logging.warning("NPU asset extraction failed", exc_info=True)
+        return False
+
 
 def get_whisper_npu_zip_path(chipset: str) -> str:
     return os.path.join(model_root_dir, "whisper-npu", f"{chipset}.zip")
@@ -272,6 +350,16 @@ class ModelType(enum.Enum):
             # See: https://github.com/SYSTRAN/faster-whisper/issues/541
             (self == ModelType.FASTER_WHISPER
                 and platform.system() == "Darwin" and platform.machine() == "x86_64")
+        ):
+            return False
+        if (
+            # Hide engine options whose wheels are platform-marker-excluded
+            # on Windows ARM64 (pyproject: platform_machine != 'ARM64'):
+            # they cannot import there, so offering them only yields dead
+            # legs — the same policy as the Faster Whisper macOS x86_64
+            # gate above.
+            self in (ModelType.WHISPER, ModelType.FASTER_WHISPER)
+            and platform.system() == "Windows" and platform.machine() == "ARM64"
         ):
             return False
         if self == ModelType.WHISPER_NPU:
@@ -578,6 +666,16 @@ class TranscriptionModel:
         self.open_path(path=os.path.dirname(model_path))
 
     @staticmethod
+    def _default_model_type() -> "ModelType":
+        # Prefer the Hexagon NPU engine where it can run (Windows ARM64
+        # with a supported Snapdragon): first-run users get NPU
+        # transcription, and whisper.cpp stays the default everywhere else
+        # and the fallback everywhere. Env overrides still win in default().
+        if ModelType.WHISPER_NPU.is_available():
+            return ModelType.WHISPER_NPU
+        return next(mt for mt in ModelType if mt.is_available())
+
+    @staticmethod
     def default():
         default_type_env = os.getenv("BUZZ_DEFAULT_MODEL_TYPE")
         default_size_env = os.getenv("BUZZ_DEFAULT_MODEL_SIZE")
@@ -587,9 +685,9 @@ class TranscriptionModel:
                 model_type = ModelType(default_type_env)
             except ValueError:
                 logging.warning("Unknown BUZZ_DEFAULT_MODEL_TYPE=%r, using default", default_type_env)
-                model_type = next(mt for mt in ModelType if mt.is_available())
+                model_type = TranscriptionModel._default_model_type()
         else:
-            model_type = next(mt for mt in ModelType if mt.is_available())
+            model_type = TranscriptionModel._default_model_type()
 
         if default_size_env:
             try:
