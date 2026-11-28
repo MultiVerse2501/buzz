@@ -17,6 +17,11 @@
 AppId={{574290A2-EF7C-4845-85F3-BFF2F011A580}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; ARM64-only build: the bundled Python runtime, whisper.cpp binaries and
+; QNN payload are all aarch64. Refuse other architectures, and install in
+; 64-bit mode so {autopf} resolves to the 64-bit Program Files.
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
 DefaultDirName={autopf}\{#AppName}
 DisableProgramGroupPage=yes
 ; Uncomment the following line to run in non administrative install mode (install for current user only.)
